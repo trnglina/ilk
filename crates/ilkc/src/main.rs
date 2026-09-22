@@ -1,7 +1,12 @@
+mod compiler;
+
 use std::{fs, path::PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
+use ilk::ProseParser;
+
+use crate::compiler::Compiler;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -22,6 +27,8 @@ enum Format {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let source = fs::read_to_string(&cli.file)?;
+    let parser = ProseParser::new(&source);
+    let compiler = Compiler::new(parser);
 
     Ok(())
 }
