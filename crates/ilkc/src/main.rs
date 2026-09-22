@@ -1,13 +1,12 @@
-mod compiler;
 mod writer;
 
 use std::{fs, io, path::PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use ilk::ProseParser;
+use ilk::{Compiler, ProseParser};
 
-use crate::{compiler::Compiler, writer::souffle::SouffleWriter};
+use crate::writer::souffle::SouffleWriter;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]

@@ -4,32 +4,48 @@ use std::{
     vec,
 };
 
-use anyhow::{Context, Result};
 use functor_derive::Functor;
-use ilk::{
-    AtomHandle, CompoundHandle, IntoTerm, ParseTerm, ProseChunk, ProseParser, Term, TermTable,
+use thiserror::Error;
+
+use crate::{
+    AtomHandle, CompoundHandle, IntoTerm, ParseTerm, ProseChunk, ProseError, ProseParser, Term,
+    TermTable,
 };
 
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum CompilerError {
+    #[error("{source} at {offset}")]
+    Parse { offset: usize, source: ProseError },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RegionId(pub u32);
+pub struct RegionId(u32);
 
 impl RegionId {
+    pub fn new(id: usize) -> Self {
+        Self(u32::try_from(id).expect("id fits in u32"))
+    }
+
     pub fn value(self) -> u32 {
         self.0
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TermId(pub u32);
+pub struct TermId(u32);
 
 impl TermId {
+    pub fn new(id: usize) -> Self {
+        Self(u32::try_from(id).expect("id fits in u32"))
+    }
+
     pub fn value(self) -> u32 {
         self.0
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Functor)]
-pub enum Event<'s, AtomT> {
+pub enum CompilerEvent<'s, AtomT> {
     Text(&'s str),
     RegionStart(RegionId, u32),
     RegionEnd(RegionId, u32),
@@ -90,7 +106,7 @@ impl<'s> Compiler<'s> {
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<Event<'s, &str>>> {
+    pub fn next(&mut self) -> Option<Result<CompilerEvent<'s, &str>, CompilerError>> {
         loop {
             if self.done {
                 return None;
@@ -109,7 +125,7 @@ impl<'s> Compiler<'s> {
         }
     }
 
-    fn step(&mut self) -> Result<Option<Event<'s, AtomHandle>>> {
+    fn step(&mut self) -> Result<Option<CompilerEvent<'s, AtomHandle>>, CompilerError> {
         if let Some(event) = self.drain_pending()? {
             return Ok(Some(event));
         }
@@ -122,33 +138,41 @@ impl<'s> Compiler<'s> {
             return Ok(None);
         };
 
-        let chunk = chunk.with_context(|| format!("at input byte {}", self.parser.offset()))?;
+        let chunk = chunk.map_err(|source| CompilerError::Parse {
+            offset: self.parser.offset(),
+            source,
+        })?;
+
         let event = self.generate_event(chunk)?;
 
         Ok(event)
     }
 
-    fn generate_event(&mut self, chunk: ProseChunk<'s>) -> Result<Option<Event<'s, AtomHandle>>> {
+    fn generate_event(
+        &mut self,
+        chunk: ProseChunk<'s>,
+    ) -> Result<Option<CompilerEvent<'s, AtomHandle>>, CompilerError> {
         Ok(match chunk {
             ProseChunk::Text(text) => {
-                self.text_offset = self.text_offset + u32::try_from(text.len())?;
-                Some(Event::Text(text))
+                self.text_offset =
+                    self.text_offset + u32::try_from(text.len()).expect("text offset fits in u32");
+                Some(CompilerEvent::Text(text))
             }
             ProseChunk::RegionStart { id } => {
-                let id = RegionId(u32::try_from(id)?);
+                let id = RegionId::new(id);
                 self.region_map.insert(id, Vec::default());
                 self.current_region = Some(id);
-                Some(Event::RegionStart(id, self.text_offset))
+                Some(CompilerEvent::RegionStart(id, self.text_offset))
             }
             ProseChunk::RegionEnd { id } => {
-                let id = RegionId(u32::try_from(id)?);
+                let id = RegionId::new(id);
                 let children = self.region_map.remove(&id).expect("well-formed region");
                 self.pending = Some(Pending::Close {
                     id,
                     children: children.into_iter(),
                     last_outer: None,
                 });
-                Some(Event::RegionEnd(id, self.text_offset))
+                Some(CompilerEvent::RegionEnd(id, self.text_offset))
             }
             ProseChunk::TermEvent(event) => match event {
                 ParseTerm::CompoundStart(atom) => {
@@ -182,25 +206,28 @@ impl<'s> Compiler<'s> {
                     debug_assert!(self.compound_stack.is_empty());
                     let term = self.current_fact.take().expect("fact has a root");
                     let region = self.current_region.expect("fact has a region");
-                    Some(Event::Assertion(self.term_ids[&term], region))
+                    Some(CompilerEvent::Assertion(self.term_ids[&term], region))
                 }
             },
         })
     }
 
-    fn generate_term_event(&mut self, term: Term) -> Result<Option<Event<'s, AtomHandle>>> {
+    fn generate_term_event(
+        &mut self,
+        term: Term,
+    ) -> Result<Option<CompilerEvent<'s, AtomHandle>>, CompilerError> {
         if self.term_ids.contains_key(&term) {
             return Ok(None);
         }
 
-        let id = TermId(u32::try_from(self.term_ids.len())?);
+        let id = TermId::new(self.term_ids.len());
 
         self.term_ids.insert(term, id);
 
         Ok(Some(match term {
-            Term::Atom(atom) => Event::Atom(id, atom),
-            Term::Integer(value) => Event::Integer(id, value.value()),
-            Term::Real(value) => Event::Real(id, value.value()),
+            Term::Atom(atom) => CompilerEvent::Atom(id, atom),
+            Term::Integer(value) => CompilerEvent::Integer(id, value.value()),
+            Term::Real(value) => CompilerEvent::Real(id, value.value()),
             Term::Compound(compound) => {
                 let (functor, _) = self.term_table.compound_value(compound);
                 let functor = self.term_ids[&Term::Atom(functor)];
@@ -209,12 +236,12 @@ impl<'s> Compiler<'s> {
                     compound,
                     position: 0,
                 });
-                Event::Compound(id, functor)
+                CompilerEvent::Compound(id, functor)
             }
         }))
     }
 
-    fn drain_pending(&mut self) -> Result<Option<Event<'s, AtomHandle>>> {
+    fn drain_pending(&mut self) -> Result<Option<CompilerEvent<'s, AtomHandle>>, CompilerError> {
         let Some(pending) = self.pending.as_mut() else {
             return Ok(None);
         };
@@ -227,9 +254,13 @@ impl<'s> Compiler<'s> {
             } => {
                 let (_, args) = self.term_table.compound_value(*compound);
                 if let Some(term) = args.get(*position) {
-                    let index = u32::try_from(*position)?;
+                    let index = u32::try_from(*position).expect("arg index fits in u32");
                     *position += 1;
-                    return Ok(Some(Event::Argument(*id, index, self.term_ids[term])));
+                    return Ok(Some(CompilerEvent::Argument(
+                        *id,
+                        index,
+                        self.term_ids[term],
+                    )));
                 }
             }
             Pending::Close {
@@ -238,7 +269,7 @@ impl<'s> Compiler<'s> {
                 last_outer,
             } => {
                 if let Some(child) = children.next() {
-                    return Ok(Some(Event::Parent(*id, child)));
+                    return Ok(Some(CompilerEvent::Parent(*id, child)));
                 }
                 let lower = last_outer.map_or(Bound::Unbounded, Bound::Excluded);
                 if let Some((&outer, children)) = self
@@ -251,7 +282,7 @@ impl<'s> Compiler<'s> {
                     }
                     children.push(*id);
                     *last_outer = Some(outer);
-                    return Ok(Some(Event::Ancestor(outer, *id)));
+                    return Ok(Some(CompilerEvent::Ancestor(outer, *id)));
                 }
             }
         }

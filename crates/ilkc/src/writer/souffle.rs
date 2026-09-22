@@ -5,8 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
-
-use crate::compiler::{Compiler, Event};
+use ilk::{Compiler, CompilerEvent};
 
 pub struct SouffleWriter<'s, 'o> {
     compiler: Compiler<'s>,
@@ -33,33 +32,35 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
 
         while let Some(event) = self.compiler.next() {
             match event? {
-                Event::Text(chunk) => text.write_all(chunk.as_bytes())?,
-                Event::RegionStart(id, offset) => {
+                CompilerEvent::Text(chunk) => text.write_all(chunk.as_bytes())?,
+                CompilerEvent::RegionStart(id, offset) => {
                     writeln!(region_start_table, "{}\t{offset}", id.value())?
                 }
-                Event::RegionEnd(id, offset) => {
+                CompilerEvent::RegionEnd(id, offset) => {
                     writeln!(region_end_table, "{}\t{offset}", id.value())?
                 }
-                Event::Assertion(term, region) => {
+                CompilerEvent::Assertion(term, region) => {
                     writeln!(assertion_table, "{}\t{}", term.value(), region.value())?
                 }
-                Event::Parent(outer, inner) => {
+                CompilerEvent::Parent(outer, inner) => {
                     writeln!(parent_table, "{}\t{}", outer.value(), inner.value())?
                 }
-                Event::Ancestor(outer, inner) => {
+                CompilerEvent::Ancestor(outer, inner) => {
                     writeln!(ancestor_table, "{}\t{}", outer.value(), inner.value())?
                 }
-                Event::Atom(id, value) => {
+                CompilerEvent::Atom(id, value) => {
                     write!(atom_table, "{},", id.value())?;
                     write_symbol(&mut atom_table, value)?;
                     atom_table.write_all(b"\n")?;
                 }
-                Event::Integer(id, value) => writeln!(integer_table, "{}\t{value}", id.value())?,
-                Event::Real(id, value) => writeln!(real_table, "{}\t{value}", id.value())?,
-                Event::Compound(id, functor) => {
+                CompilerEvent::Integer(id, value) => {
+                    writeln!(integer_table, "{}\t{value}", id.value())?
+                }
+                CompilerEvent::Real(id, value) => writeln!(real_table, "{}\t{value}", id.value())?,
+                CompilerEvent::Compound(id, functor) => {
                     writeln!(compound_table, "{}\t{}", id.value(), functor.value())?
                 }
-                Event::Argument(id, position, term) => writeln!(
+                CompilerEvent::Argument(id, position, term) => writeln!(
                     argument_table,
                     "{}\t{position}\t{}",
                     id.value(),
