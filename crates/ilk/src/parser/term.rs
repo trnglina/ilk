@@ -3,7 +3,7 @@ use std::{borrow::Cow, iter::FusedIterator, num::NonZeroUsize};
 use thiserror::Error;
 
 use crate::{
-    parser::ident::{is_ident_start, scan_ident},
+    parser::ident::scan_ident,
     term::{IntegerTerm, IntoTerm, RealTerm, Term, TermTable},
 };
 
@@ -154,6 +154,10 @@ impl<'a> TermParser<'a> {
         self.source.as_bytes().get(self.offset).copied()
     }
 
+    fn peekn(&self, off: usize) -> Option<u8> {
+        self.source.as_bytes().get(self.offset + off).copied()
+    }
+
     fn step(&mut self) -> Result<Option<ParseTerm<'a>>, TermError> {
         match self.state {
             TermParserState::AwaitingFact => {
@@ -206,7 +210,10 @@ impl<'a> TermParser<'a> {
 
     fn parse_term(&mut self, depth: NonZeroUsize) -> Result<ParseTerm<'a>, TermError> {
         match self.peek() {
-            Some(b'-' | b'0'..=b'9') => {
+            Some(byte)
+                if byte.is_ascii_digit()
+                    || (byte == b'-' && self.peekn(1).is_some_and(|c| c.is_ascii_digit())) =>
+            {
                 let number = self.parse_number()?;
                 self.state = TermParserState::FinishedTerm { depth: depth.get() };
                 Ok(ParseTerm::Number(number))
@@ -245,13 +252,7 @@ impl<'a> TermParser<'a> {
         }
 
         let mut is_real = false;
-        if self.peek() == Some(b'.')
-            && self
-                .source
-                .as_bytes()
-                .get(self.offset + 1)
-                .is_some_and(u8::is_ascii_digit)
-        {
+        if self.peek() == Some(b'.') && self.peekn(1).is_some_and(|c| c.is_ascii_digit()) {
             is_real = true;
             self.offset += 1;
             while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
@@ -296,15 +297,16 @@ impl<'a> TermParser<'a> {
     }
 
     fn parse_atom(&mut self) -> Result<ParseAtom<'a>, TermError> {
+        if let Some(end) = scan_ident(self.source, self.offset) {
+            let start = self.offset;
+            self.offset = end;
+            return Ok(ParseAtom {
+                body: &self.source[start..end],
+                quoted: false,
+            });
+        }
+
         match self.peek() {
-            Some(byte) if is_ident_start(byte) => {
-                let start = self.offset;
-                self.offset = scan_ident(self.source, start);
-                Ok(ParseAtom {
-                    body: &self.source[start..self.offset],
-                    quoted: false,
-                })
-            }
             Some(b'\'') => self.parse_quoted_atom(),
             Some(_) => Err(TermError::UnexpectedCharacter),
             None => Err(TermError::UnexpectedEndOfFile),
@@ -318,7 +320,7 @@ impl<'a> TermParser<'a> {
         while self.offset < self.source.len() {
             let current = self.source[self.offset..].chars().next().unwrap();
             if current == '\'' {
-                if self.source.as_bytes().get(self.offset + 1) == Some(&b'\'') {
+                if self.peekn(1) == Some(b'\'') {
                     self.offset += 2;
                     continue;
                 }

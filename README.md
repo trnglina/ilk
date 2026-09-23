@@ -28,7 +28,7 @@ region_end($a, 0).
 
 Facts are written in a Prolog-like style, as atoms, or compounds of a functor atom with an arbitrary number of argument terms. Multiple facts can be asserted by separating them with a semicolon (`;`). In addition to atoms (including quoted atoms) and compounds, integers and real numbers are available as terms:
 
-Unlike Prolog, unquoted atom names (and region labels) may start with any ASCII letter (including uppercase!), `$`, `?`, or `#`. Subsequent characters may also be ASCII digits or `_`.
+Unquoted atom names have two forms: word names and symbol names. Word names (also used for region labels) are sequences of ASCII letters and numbers separated by underscores, and may optionally start/end with one of `$`, `?`, or `#`. Symbol names are sequences of `&*+-./:<=>@\\^~`.
 
 ```ilk
 @{has(alice, item(lantern, 1)); name(alice, 'Alice')}Alice picked up the lantern.

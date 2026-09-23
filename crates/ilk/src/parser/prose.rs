@@ -3,7 +3,7 @@ use std::{collections::HashMap, iter::FusedIterator, ops::Range};
 use thiserror::Error;
 
 use crate::parser::{
-    ident::{is_ident_start, scan_ident},
+    ident::{is_word_ident_start, scan_word_ident},
     term::{ParseTerm, TermError, TermParser},
 };
 
@@ -650,10 +650,10 @@ fn scan_marker<'a>(source: &'a str, offset: usize) -> Marker<'a> {
     } else if rest
         .as_bytes()
         .first()
-        .is_some_and(|byte| is_ident_start(*byte))
+        .is_some_and(|byte| is_word_ident_start(*byte))
     {
         let label_start = offset + 1;
-        let label_end = scan_ident(source, label_start);
+        let label_end = scan_word_ident(source, label_start);
         let label = Some(&source[label_start..label_end]);
         match source.as_bytes().get(label_end) {
             Some(b'<') => Marker::RegionOpenStart {
