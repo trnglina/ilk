@@ -3,7 +3,7 @@ use std::{collections::HashMap, iter::FusedIterator, ops::Range};
 use thiserror::Error;
 
 use crate::parser::{
-    ident::scan_ident,
+    ident::{is_ident_start, scan_ident},
     term::{ParseTerm, TermError, TermParser},
 };
 
@@ -647,7 +647,11 @@ fn scan_marker<'a>(source: &'a str, offset: usize) -> Marker<'a> {
         Marker::BlockClose {
             marker_start: offset,
         }
-    } else if rest.as_bytes().first().is_some_and(u8::is_ascii_lowercase) {
+    } else if rest
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| is_ident_start(*byte))
+    {
         let label_start = offset + 1;
         let label_end = scan_ident(source, label_start);
         let label = Some(&source[label_start..label_end]);

@@ -3,7 +3,7 @@ use std::{borrow::Cow, iter::FusedIterator, num::NonZeroUsize};
 use thiserror::Error;
 
 use crate::{
-    parser::ident::scan_ident,
+    parser::ident::{is_ident_start, scan_ident},
     term::{IntegerTerm, IntoTerm, RealTerm, Term, TermTable},
 };
 
@@ -297,7 +297,7 @@ impl<'a> TermParser<'a> {
 
     fn parse_atom(&mut self) -> Result<ParseAtom<'a>, TermError> {
         match self.peek() {
-            Some(b'a'..=b'z') => {
+            Some(byte) if is_ident_start(byte) => {
                 let start = self.offset;
                 self.offset = scan_ident(self.source, start);
                 Ok(ParseAtom {

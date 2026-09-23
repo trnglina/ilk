@@ -26,7 +26,9 @@ assertion(start, $a).
 region_end($a, 0).
 ```
 
-Facts are written in the Prolog style, as atoms, or compounds of a functor atom with an arbitrary number of argument terms. Multiple facts can be asserted by separating them with a semicolon (`;`). In addition to atoms (including quoted atoms) and compounds, integers and real numbers are available as terms:
+Facts are written in a Prolog-like style, as atoms, or compounds of a functor atom with an arbitrary number of argument terms. Multiple facts can be asserted by separating them with a semicolon (`;`). In addition to atoms (including quoted atoms) and compounds, integers and real numbers are available as terms:
+
+Unlike Prolog, unquoted atom names (and region labels) may start with any ASCII letter (including uppercase!), `$`, `?`, or `#`. Subsequent characters may also be ASCII digits or `_`.
 
 ```ilk
 @{has(alice, item(lantern, 1)); name(alice, 'Alice')}Alice picked up the lantern.
