@@ -156,7 +156,7 @@ enum TermParserState {
 
 pub struct TermParser<'a> {
     source: &'a str,
-    terminator: u8,
+    terminator: Option<u8>,
     operators: Option<&'a OperatorConfig<'a>>,
     offset: usize,
     frame_stack: Vec<ExpressionFrame<'a>>,
@@ -168,8 +168,15 @@ impl<'a> TermParser<'a> {
         assert!(terminator.is_ascii(), "terminator must be ascii");
 
         Self {
+            terminator: Some(terminator),
+            ..Self::standalone(source, operators)
+        }
+    }
+
+    pub fn standalone(source: &'a str, operators: Option<&'a OperatorConfig<'a>>) -> Self {
+        Self {
             source,
-            terminator,
+            terminator: None,
             operators,
             offset: 0,
             state: TermParserState::AwaitingFact,
@@ -179,6 +186,13 @@ impl<'a> TermParser<'a> {
 
     pub fn offset(&self) -> usize {
         self.offset
+    }
+
+    pub fn current_fact_start_offset(&self) -> Option<usize> {
+        match self.frame_stack.first()?.kind {
+            FrameKind::Root { start } => Some(start),
+            _ => None,
+        }
     }
 
     fn peek(&self) -> Option<u8> {
@@ -215,6 +229,10 @@ impl<'a> TermParser<'a> {
         match self.state {
             TermParserState::AwaitingFact => {
                 self.skip_trivia()?;
+                if self.terminator.is_none() && self.peek().is_none() {
+                    self.state = TermParserState::Done;
+                    return Ok(None);
+                }
                 self.begin_parsing_operand()
             }
             TermParserState::Operand => {
@@ -436,13 +454,18 @@ impl<'a> TermParser<'a> {
                 }
 
                 match self.peek() {
-                    Some(byte) if byte == self.terminator => self.state = TermParserState::Done,
+                    Some(byte) if Some(byte) == self.terminator => {
+                        self.state = TermParserState::Done;
+                    }
                     Some(b';') => self.state = TermParserState::AwaitingFact,
                     Some(_) => return Err(TermError::UnexpectedCharacter),
+                    None if self.terminator.is_none() => self.state = TermParserState::Done,
                     None => return Err(TermError::UnexpectedEndOfFile),
                 }
 
-                self.offset += 1;
+                if self.peek().is_some() {
+                    self.offset += 1;
+                }
                 self.frame_stack.clear();
 
                 Ok(Some(ParseTerm::FactEnd))
@@ -661,7 +684,7 @@ fn scan_operator<'a>(
 fn scan_operator_end<'a>(
     source: &'a str,
     offset: usize,
-    terminator: u8,
+    terminator: Option<u8>,
     operators: Option<&OperatorConfig<'a>>,
 ) -> bool {
     let Ok(offset) = scan_trivia(source, offset) else {
@@ -671,7 +694,7 @@ fn scan_operator_end<'a>(
     match source.as_bytes().get(offset).copied() {
         None | Some(b')' | b',' | b';') => true,
         Some(byte) => {
-            byte == terminator
+            Some(byte) == terminator
                 || (scan_compound_start(source, offset).is_none()
                     && operators.is_some_and(|operators| {
                         scan_operator(source, offset, operators, false).is_some()

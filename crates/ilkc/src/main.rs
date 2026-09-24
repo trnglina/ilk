@@ -1,3 +1,4 @@
+mod meta;
 mod writer;
 
 use std::{fs, io, path::PathBuf};
@@ -19,6 +20,9 @@ struct Cli {
     #[arg(short, long, value_enum, default_value_t = Format::Souffle)]
     format: Format,
 
+    #[arg(short, long, value_name = "PATH")]
+    meta: Vec<PathBuf>,
+
     file: PathBuf,
 }
 
@@ -30,7 +34,9 @@ enum Format {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let source = fs::read_to_string(&cli.file)?;
-    let parser = ProseParser::new(&source, None);
+    let definitions = meta::load(&cli.meta)?;
+    let operators = definitions.config()?;
+    let parser = ProseParser::new(&source, operators.as_ref());
     let compiler = Compiler::new(parser);
     let mut writer = match cli.format {
         Format::Souffle => SouffleWriter::new(compiler, &cli.out_dir),
