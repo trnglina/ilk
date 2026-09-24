@@ -329,7 +329,6 @@ impl<'a> ProseParser<'a> {
                 marker_start,
                 marker_end,
             } => {
-                self.offset = marker_end;
                 let region = match label {
                     Some(label) => self.labeled_region_map.remove(label),
                     None => self.anonymous_region_stack.pop(),
@@ -340,6 +339,7 @@ impl<'a> ProseParser<'a> {
                     return Err(ProseError::UnmatchedRegionEnd);
                 };
 
+                self.offset = marker_end;
                 Ok(Some(ProseChunk::RegionEnd { id: region.id }))
             }
             Marker::BlockOpenStart {
@@ -355,7 +355,6 @@ impl<'a> ProseParser<'a> {
                 Ok(Some(ProseChunk::RegionStart { id }))
             }
             Marker::BlockClose { marker_start } => {
-                self.offset = marker_start + 2;
                 let region = self.block_stack.pop().map(|block| block.region);
 
                 let Some(region) = region else {
@@ -363,6 +362,7 @@ impl<'a> ProseParser<'a> {
                     return Err(ProseError::UnmatchedRegionEnd);
                 };
 
+                self.offset = marker_start + 2;
                 self.state = ProseParserState::FinishingBlockEnd;
                 Ok(Some(ProseChunk::RegionEnd { id: region.id }))
             }
@@ -489,24 +489,21 @@ impl<'a> ProseParser<'a> {
         }
 
         let line_start = self.offset;
-        while self.offset < end && matches!(self.source.as_bytes()[self.offset], b' ' | b'\t') {
-            self.offset += 1;
-        }
+        let content_start = scan_horizontal_whitespace(self.source, line_start, end);
 
-        if self.offset < end {
-            if let Some(newline_end) = scan_newline_sequence(self.source, self.offset, end) {
-                let text = &self.source[self.offset..newline_end];
+        if content_start < end {
+            if let Some(newline_end) = scan_newline_sequence(self.source, content_start, end) {
+                let text = &self.source[content_start..newline_end];
                 self.offset = newline_end;
                 return Ok(Some(text));
             }
 
-            let line_end = scan_end_of_line(self.source, self.offset, end);
+            let line_end = scan_end_of_line(self.source, content_start, end);
             let text = self.parse_block_indent(line_start..line_end, self.block_stack.len())?;
             self.offset = line_end;
             return Ok(Some(text));
         }
 
-        self.offset = line_start;
         match ending {
             BlockLineEnd::InlineMarker => {
                 let text = self.parse_block_indent(line_start..end, self.block_stack.len())?;
@@ -705,4 +702,11 @@ fn scan_end_of_line(source: &str, mut offset: usize, end: usize) -> usize {
         offset += character.len_utf8();
     }
     end
+}
+
+fn scan_horizontal_whitespace(source: &str, mut offset: usize, end: usize) -> usize {
+    while offset < end && matches!(source.as_bytes()[offset], b' ' | b'\t') {
+        offset += 1;
+    }
+    offset
 }

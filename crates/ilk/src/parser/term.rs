@@ -230,63 +230,9 @@ impl<'a> TermParser<'a> {
     }
 
     fn parse_number(&mut self) -> Result<ParseNumber, TermError> {
-        let start = self.offset;
-        if self.peek() == Some(b'-') {
-            self.offset += 1;
-        }
-
-        let integer_start = self.offset;
-        while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-            self.offset += 1;
-        }
-        if self.offset == integer_start {
-            self.offset = start;
-            return Err(TermError::UnexpectedCharacter);
-        }
-
-        let mut is_real = false;
-        if self.peek() == Some(b'.') && self.peekn(1).is_some_and(|c| c.is_ascii_digit()) {
-            is_real = true;
-            self.offset += 1;
-            while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                self.offset += 1;
-            }
-        }
-
-        if matches!(self.peek(), Some(b'e' | b'E')) {
-            is_real = true;
-            self.offset += 1;
-            if matches!(self.peek(), Some(b'+' | b'-')) {
-                self.offset += 1;
-            }
-            let exponent_start = self.offset;
-            while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                self.offset += 1;
-            }
-            if self.offset == exponent_start {
-                self.offset = start;
-                return Err(TermError::InvalidReal);
-            }
-        }
-
-        let body = &self.source[start..self.offset];
-        if is_real {
-            if let Ok(value) = body.parse::<f32>()
-                && value.is_finite()
-            {
-                Ok(ParseNumber::Real(RealTerm::new(value)))
-            } else {
-                self.offset = start;
-                Err(TermError::InvalidReal)
-            }
-        } else {
-            if let Ok(value) = body.parse::<i32>() {
-                Ok(ParseNumber::Integer(IntegerTerm::new(value)))
-            } else {
-                self.offset = start;
-                Err(TermError::InvalidInteger)
-            }
-        }
+        let (number, end) = scan_number(self.source, self.offset)?;
+        self.offset = end;
+        Ok(number)
     }
 
     fn parse_atom(&mut self) -> Result<ParseAtom<'a>, TermError> {
@@ -606,6 +552,65 @@ impl<'a> Iterator for TermParser<'a> {
 }
 
 impl FusedIterator for TermParser<'_> {}
+
+fn scan_number(source: &str, mut offset: usize) -> Result<(ParseNumber, usize), TermError> {
+    let bytes = source.as_bytes();
+    let start = offset;
+    if bytes.get(offset).copied() == Some(b'-') {
+        offset += 1;
+    }
+
+    let integer_start = offset;
+    while bytes.get(offset).is_some_and(u8::is_ascii_digit) {
+        offset += 1;
+    }
+    if offset == integer_start {
+        return Err(TermError::UnexpectedCharacter);
+    }
+
+    let mut is_real = false;
+    if bytes.get(offset).copied() == Some(b'.')
+        && bytes.get(offset + 1).is_some_and(u8::is_ascii_digit)
+    {
+        is_real = true;
+        offset += 1;
+        while bytes.get(offset).is_some_and(u8::is_ascii_digit) {
+            offset += 1;
+        }
+    }
+
+    if matches!(bytes.get(offset).copied(), Some(b'e' | b'E')) {
+        is_real = true;
+        offset += 1;
+        if matches!(bytes.get(offset).copied(), Some(b'+' | b'-')) {
+            offset += 1;
+        }
+        let exponent_start = offset;
+        while bytes.get(offset).is_some_and(u8::is_ascii_digit) {
+            offset += 1;
+        }
+        if offset == exponent_start {
+            return Err(TermError::InvalidReal);
+        }
+    }
+
+    let body = &source[start..offset];
+    if is_real {
+        if let Ok(value) = body.parse::<f32>()
+            && value.is_finite()
+        {
+            Ok((ParseNumber::Real(RealTerm::new(value)), offset))
+        } else {
+            Err(TermError::InvalidReal)
+        }
+    } else {
+        if let Ok(value) = body.parse::<i32>() {
+            Ok((ParseNumber::Integer(IntegerTerm::new(value)), offset))
+        } else {
+            Err(TermError::InvalidInteger)
+        }
+    }
+}
 
 fn scan_trivia(source: &str, mut offset: usize) -> Result<usize, (TermError, usize)> {
     loop {
