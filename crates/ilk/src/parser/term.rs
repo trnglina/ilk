@@ -96,27 +96,16 @@ impl<'a> ParseAtom<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ParseTermHead<'a> {
-    CompoundStart(ParseAtom<'a>),
-    Atom(ParseAtom<'a>),
-}
-
-impl<'a> From<ParseTermHead<'a>> for ParseTerm<'a> {
-    fn from(value: ParseTermHead<'a>) -> Self {
-        match value {
-            ParseTermHead::CompoundStart(functor) => ParseTerm::CompoundStart(functor),
-            ParseTermHead::Atom(atom) => ParseTerm::Atom(atom),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseTerm<'a> {
-    CompoundStart(ParseAtom<'a>),
     Atom(ParseAtom<'a>),
     Number(ParseNumber),
-    CompoundEnd,
+    Compound(ParseAtom<'a>, usize),
     FactEnd,
+}
+
+struct CompoundFrame<'a> {
+    functor: ParseAtom<'a>,
+    args: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,6 +122,7 @@ pub struct TermParser<'a> {
     terminator: u8,
     offset: usize,
     state: TermParserState,
+    compounds: Vec<CompoundFrame<'a>>,
 }
 
 impl<'a> TermParser<'a> {
@@ -143,6 +133,7 @@ impl<'a> TermParser<'a> {
             terminator,
             offset: 0,
             state: TermParserState::AwaitingFact,
+            compounds: Vec::new(),
         }
     }
 
@@ -162,11 +153,11 @@ impl<'a> TermParser<'a> {
         match self.state {
             TermParserState::AwaitingFact => {
                 self.skip_trivia()?;
-                return Ok(Some(self.parse_term_head(0)?.into()));
+                return self.parse_term_head(0);
             }
             TermParserState::AwaitingTerm { depth } => {
                 self.skip_trivia()?;
-                return Ok(Some(self.parse_term(depth)?));
+                return self.parse_term(depth);
             }
             TermParserState::FinishedTerm { depth } => {
                 self.skip_trivia()?;
@@ -174,6 +165,7 @@ impl<'a> TermParser<'a> {
                     match self.peek() {
                         Some(b',') => {
                             self.offset += 1;
+                            self.compounds.last_mut().expect("open compound").args += 1;
                             self.state = TermParserState::AwaitingTerm { depth };
                             return Ok(None);
                         }
@@ -182,7 +174,8 @@ impl<'a> TermParser<'a> {
                             self.state = TermParserState::FinishedTerm {
                                 depth: depth.get() - 1,
                             };
-                            return Ok(Some(ParseTerm::CompoundEnd));
+                            let frame = self.compounds.pop().expect("open compound");
+                            return Ok(Some(ParseTerm::Compound(frame.functor, frame.args + 1)));
                         }
                         Some(_) => return Err(TermError::UnexpectedCharacter),
                         None => return Err(TermError::UnexpectedEndOfFile),
@@ -208,7 +201,7 @@ impl<'a> TermParser<'a> {
         }
     }
 
-    fn parse_term(&mut self, depth: NonZeroUsize) -> Result<ParseTerm<'a>, TermError> {
+    fn parse_term(&mut self, depth: NonZeroUsize) -> Result<Option<ParseTerm<'a>>, TermError> {
         match self.peek() {
             Some(byte)
                 if byte.is_ascii_digit()
@@ -216,23 +209,27 @@ impl<'a> TermParser<'a> {
             {
                 let number = self.parse_number()?;
                 self.state = TermParserState::FinishedTerm { depth: depth.get() };
-                Ok(ParseTerm::Number(number))
+                Ok(Some(ParseTerm::Number(number)))
             }
-            Some(_) => Ok(self.parse_term_head(depth.get())?.into()),
+            Some(_) => self.parse_term_head(depth.get()),
             None => Err(TermError::UnexpectedEndOfFile),
         }
     }
 
-    fn parse_term_head(&mut self, depth: usize) -> Result<ParseTermHead<'a>, TermError> {
+    fn parse_term_head(&mut self, depth: usize) -> Result<Option<ParseTerm<'a>>, TermError> {
         let atom = self.parse_atom()?;
         if self.peek() == Some(b'(') {
             self.offset += 1;
             let depth = NonZeroUsize::new(depth + 1).expect("compound depth exceeds usize::MAX");
+            self.compounds.push(CompoundFrame {
+                functor: atom,
+                args: 0,
+            });
             self.state = TermParserState::AwaitingTerm { depth };
-            Ok(ParseTermHead::CompoundStart(atom))
+            Ok(None)
         } else {
             self.state = TermParserState::FinishedTerm { depth };
-            Ok(ParseTermHead::Atom(atom))
+            Ok(Some(ParseTerm::Atom(atom)))
         }
     }
 

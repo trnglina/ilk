@@ -59,12 +59,8 @@ pub enum CompilerEvent<'s, AtomT> {
     Argument(TermId, u32, TermId),
 }
 
-struct CompoundFrame {
-    functor: AtomHandle,
-    args: Vec<Term>,
-}
-
 enum Pending {
+    Compound(Term),
     Arguments {
         id: TermId,
         compound: CompoundHandle,
@@ -81,9 +77,8 @@ pub struct Compiler<'s> {
     parser: ProseParser<'s>,
     term_table: TermTable,
     term_ids: HashMap<Term, TermId>,
-    compound_stack: Vec<CompoundFrame>,
+    term_stack: Vec<Term>,
     region_map: BTreeMap<RegionId, Vec<RegionId>>,
-    current_fact: Option<Term>,
     current_region: Option<RegionId>,
     text_offset: u32,
     pending: Option<Pending>,
@@ -96,9 +91,8 @@ impl<'s> Compiler<'s> {
             parser,
             term_table: TermTable::new(),
             term_ids: HashMap::new(),
-            compound_stack: Vec::new(),
+            term_stack: Vec::new(),
             region_map: BTreeMap::new(),
-            current_fact: None,
             current_region: None,
             text_offset: 0,
             pending: None,
@@ -132,7 +126,7 @@ impl<'s> Compiler<'s> {
 
         let Some(chunk) = self.parser.next() else {
             debug_assert!(self.region_map.is_empty());
-            debug_assert!(self.compound_stack.is_empty() && self.current_fact.is_none());
+            debug_assert!(self.term_stack.is_empty());
 
             self.done = true;
             return Ok(None);
@@ -175,36 +169,36 @@ impl<'s> Compiler<'s> {
                 Some(CompilerEvent::RegionEnd(id, self.text_offset))
             }
             ProseChunk::TermEvent(event) => match event {
-                ParseTerm::CompoundStart(atom) => {
-                    let term = atom.into_term(&mut self.term_table);
-                    let Term::Atom(functor) = term else {
-                        unreachable!()
-                    };
-                    self.compound_stack.push(CompoundFrame {
-                        functor,
-                        args: Vec::new(),
-                    });
-                    self.generate_term_event(term)?
-                }
                 ParseTerm::Atom(atom) => {
                     let term = atom.into_term(&mut self.term_table);
-                    self.push_term(term);
+                    self.term_stack.push(term);
                     self.generate_term_event(term)?
                 }
                 ParseTerm::Number(number) => {
                     let term = number.into_term(&mut self.term_table);
-                    self.push_term(term);
+                    self.term_stack.push(term);
                     self.generate_term_event(term)?
                 }
-                ParseTerm::CompoundEnd => {
-                    let frame = self.compound_stack.pop().expect("well-formed compound");
-                    let term = Term::Compound(self.term_table.compound(frame.functor, &frame.args));
-                    self.push_term(term);
-                    self.generate_term_event(term)?
+                ParseTerm::Compound(atom, arity) => {
+                    let Term::Atom(functor) = atom.into_term(&mut self.term_table) else {
+                        unreachable!()
+                    };
+                    let start = self.term_stack.len() - arity;
+                    let term = Term::Compound(
+                        self.term_table.compound(functor, &self.term_stack[start..]),
+                    );
+                    self.term_stack.truncate(start);
+                    self.term_stack.push(term);
+                    if let Some(event) = self.generate_term_event(Term::Atom(functor))? {
+                        self.pending = Some(Pending::Compound(term));
+                        Some(event)
+                    } else {
+                        self.generate_term_event(term)?
+                    }
                 }
                 ParseTerm::FactEnd => {
-                    debug_assert!(self.compound_stack.is_empty());
-                    let term = self.current_fact.take().expect("fact has a root");
+                    let term = self.term_stack.pop().expect("fact has a root");
+                    debug_assert!(self.term_stack.is_empty());
                     let region = self.current_region.expect("fact has a region");
                     Some(CompilerEvent::Assertion(self.term_ids[&term], region))
                 }
@@ -242,11 +236,16 @@ impl<'s> Compiler<'s> {
     }
 
     fn drain_pending(&mut self) -> Result<Option<CompilerEvent<'s, AtomHandle>>, CompilerError> {
+        if let Some(Pending::Compound(term)) = self.pending {
+            self.pending = None;
+            return self.generate_term_event(term);
+        }
         let Some(pending) = self.pending.as_mut() else {
             return Ok(None);
         };
 
         match pending {
+            Pending::Compound(_) => unreachable!(),
             Pending::Arguments {
                 id,
                 compound,
@@ -288,14 +287,5 @@ impl<'s> Compiler<'s> {
         }
         self.pending = None;
         Ok(None)
-    }
-
-    fn push_term(&mut self, term: Term) {
-        if let Some(frame) = self.compound_stack.last_mut() {
-            frame.args.push(term);
-        } else {
-            debug_assert!(self.current_fact.is_none());
-            self.current_fact = Some(term);
-        }
     }
 }
