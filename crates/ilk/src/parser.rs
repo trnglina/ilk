@@ -1,4 +1,5 @@
 mod ident;
+mod operator;
 mod prose;
 mod term;
 
