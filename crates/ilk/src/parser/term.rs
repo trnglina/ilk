@@ -1,9 +1,12 @@
-use std::{borrow::Cow, iter::FusedIterator, num::NonZeroUsize};
+use std::{borrow::Cow, iter::FusedIterator};
 
 use thiserror::Error;
 
 use crate::{
-    parser::ident::scan_ident,
+    parser::{
+        ident::scan_ident,
+        operator::{OperatorClass, OperatorConfig},
+    },
     term::{IntegerTerm, IntoTerm, RealTerm, Term, TermTable},
 };
 
@@ -103,16 +106,50 @@ pub enum ParseTerm<'a> {
     FactEnd,
 }
 
-struct CompoundFrame<'a> {
-    functor: ParseAtom<'a>,
-    args: usize,
+struct Operand {
+    precedence: u16,
+    is_number: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingOperator<'a> {
+    atom: ParseAtom<'a>,
+    precedence: u16,
+    class: OperatorClass,
+    offset: usize,
+    end: usize,
+}
+
+enum FrameKind<'a> {
+    Root {
+        start: usize,
+    },
+    Group,
+    Arguments {
+        functor: ParseAtom<'a>,
+        argument_count: usize,
+    },
+}
+
+struct ExpressionFrame<'a> {
+    kind: FrameKind<'a>,
+    operands: Vec<Operand>,
+    operators: Vec<PendingOperator<'a>>,
+}
+
+impl<'a> ExpressionFrame<'a> {
+    fn new(kind: FrameKind<'a>) -> Self {
+        Self {
+            kind,
+            operands: Vec::new(),
+            operators: Vec::new(),
+        }
+    }
+}
+
 enum TermParserState {
     AwaitingFact,
-    AwaitingTerm { depth: NonZeroUsize },
-    FinishedTerm { depth: usize },
+    Operand,
+    Operator,
     Done,
     Failed,
 }
@@ -120,20 +157,23 @@ enum TermParserState {
 pub struct TermParser<'a> {
     source: &'a str,
     terminator: u8,
+    operators: Option<&'a OperatorConfig<'a>>,
     offset: usize,
+    frame_stack: Vec<ExpressionFrame<'a>>,
     state: TermParserState,
-    compounds: Vec<CompoundFrame<'a>>,
 }
 
 impl<'a> TermParser<'a> {
-    pub fn new(source: &'a str, terminator: u8) -> Self {
+    pub fn new(source: &'a str, terminator: u8, operators: Option<&'a OperatorConfig<'a>>) -> Self {
         assert!(terminator.is_ascii(), "terminator must be ascii");
+
         Self {
             source,
             terminator,
+            operators,
             offset: 0,
             state: TermParserState::AwaitingFact,
-            compounds: Vec::new(),
+            frame_stack: Vec::new(),
         }
     }
 
@@ -149,87 +189,43 @@ impl<'a> TermParser<'a> {
         self.source.as_bytes().get(self.offset + off).copied()
     }
 
+    fn find_operator(&self, prefix: bool) -> Option<PendingOperator<'a>> {
+        scan_operator(self.source, self.offset, self.operators?, prefix)
+    }
+
+    fn find_operator_end(&self, offset: usize) -> bool {
+        scan_operator_end(self.source, offset, self.terminator, self.operators)
+    }
+
+    fn last_frame(&mut self) -> &ExpressionFrame<'a> {
+        self.frame_stack.last().expect("non-empty expression stack")
+    }
+
+    fn last_frame_mut(&mut self) -> &mut ExpressionFrame<'a> {
+        self.frame_stack
+            .last_mut()
+            .expect("non-empty expression stack")
+    }
+
+    fn pop_frame(&mut self) -> ExpressionFrame<'a> {
+        self.frame_stack.pop().expect("non-empty expression stack")
+    }
+
     fn step(&mut self) -> Result<Option<ParseTerm<'a>>, TermError> {
         match self.state {
             TermParserState::AwaitingFact => {
                 self.skip_trivia()?;
-                return self.parse_term_head(0);
+                self.begin_parsing_operand()
             }
-            TermParserState::AwaitingTerm { depth } => {
+            TermParserState::Operand => {
                 self.skip_trivia()?;
-                return self.parse_term(depth);
+                self.step_operand()
             }
-            TermParserState::FinishedTerm { depth } => {
+            TermParserState::Operator => {
                 self.skip_trivia()?;
-                if let Some(depth) = NonZeroUsize::new(depth) {
-                    match self.peek() {
-                        Some(b',') => {
-                            self.offset += 1;
-                            self.compounds.last_mut().expect("open compound").args += 1;
-                            self.state = TermParserState::AwaitingTerm { depth };
-                            return Ok(None);
-                        }
-                        Some(b')') => {
-                            self.offset += 1;
-                            self.state = TermParserState::FinishedTerm {
-                                depth: depth.get() - 1,
-                            };
-                            let frame = self.compounds.pop().expect("open compound");
-                            return Ok(Some(ParseTerm::Compound(frame.functor, frame.args + 1)));
-                        }
-                        Some(_) => return Err(TermError::UnexpectedCharacter),
-                        None => return Err(TermError::UnexpectedEndOfFile),
-                    }
-                } else {
-                    match self.peek() {
-                        Some(byte) if byte == self.terminator => {
-                            self.offset += 1;
-                            self.state = TermParserState::Done;
-                            return Ok(Some(ParseTerm::FactEnd));
-                        }
-                        Some(b';') => {
-                            self.offset += 1;
-                            self.state = TermParserState::AwaitingFact;
-                            return Ok(Some(ParseTerm::FactEnd));
-                        }
-                        Some(_) => return Err(TermError::UnexpectedCharacter),
-                        None => return Err(TermError::UnexpectedEndOfFile),
-                    }
-                }
+                self.step_operator()
             }
             TermParserState::Done | TermParserState::Failed => unreachable!(),
-        }
-    }
-
-    fn parse_term(&mut self, depth: NonZeroUsize) -> Result<Option<ParseTerm<'a>>, TermError> {
-        match self.peek() {
-            Some(byte)
-                if byte.is_ascii_digit()
-                    || (byte == b'-' && self.peekn(1).is_some_and(|c| c.is_ascii_digit())) =>
-            {
-                let number = self.parse_number()?;
-                self.state = TermParserState::FinishedTerm { depth: depth.get() };
-                Ok(Some(ParseTerm::Number(number)))
-            }
-            Some(_) => self.parse_term_head(depth.get()),
-            None => Err(TermError::UnexpectedEndOfFile),
-        }
-    }
-
-    fn parse_term_head(&mut self, depth: usize) -> Result<Option<ParseTerm<'a>>, TermError> {
-        let atom = self.parse_atom()?;
-        if self.peek() == Some(b'(') {
-            self.offset += 1;
-            let depth = NonZeroUsize::new(depth + 1).expect("compound depth exceeds usize::MAX");
-            self.compounds.push(CompoundFrame {
-                functor: atom,
-                args: 0,
-            });
-            self.state = TermParserState::AwaitingTerm { depth };
-            Ok(None)
-        } else {
-            self.state = TermParserState::FinishedTerm { depth };
-            Ok(Some(ParseTerm::Atom(atom)))
         }
     }
 
@@ -373,20 +369,218 @@ impl<'a> TermParser<'a> {
     }
 
     fn skip_trivia(&mut self) -> Result<(), TermError> {
-        loop {
-            while self.peek().is_some_and(|byte| byte.is_ascii_whitespace()) {
-                self.offset += 1;
+        match scan_trivia(self.source, self.offset) {
+            Ok(end) => {
+                self.offset = end;
+                Ok(())
             }
-            if !self.source[self.offset..].starts_with("/*") {
-                return Ok(());
+            Err((error, offset)) => {
+                self.offset = offset;
+                Err(error)
             }
-
-            let Some(end) = self.source[self.offset + 2..].find("*/") else {
-                return Err(TermError::UnterminatedComment);
-            };
-
-            self.offset += end + 4;
         }
+    }
+
+    fn begin_parsing_operand(&mut self) -> Result<Option<ParseTerm<'a>>, TermError> {
+        self.frame_stack
+            .push(ExpressionFrame::new(FrameKind::Root { start: self.offset }));
+        self.state = TermParserState::Operand;
+        Ok(None)
+    }
+
+    fn finish_parsing_operand(&mut self, is_number: bool) {
+        self.last_frame_mut().operands.push(Operand {
+            precedence: 0,
+            is_number,
+        });
+        self.state = TermParserState::Operator;
+    }
+
+    fn step_operand(&mut self) -> Result<Option<ParseTerm<'a>>, TermError> {
+        let plain_root = self.operators.is_none() && self.frame_stack.len() == 1;
+        if plain_root && self.peek().is_some_and(|b| b.is_ascii_digit()) {
+            return Err(TermError::UnexpectedCharacter);
+        }
+
+        if !plain_root
+            && self.peek() == Some(b'-')
+            && self.peekn(1).is_some_and(|b| b.is_ascii_digit())
+        {
+            let number = self.parse_number()?;
+            self.finish_parsing_operand(true);
+            return Ok(Some(ParseTerm::Number(number)));
+        }
+
+        if scan_compound_start(self.source, self.offset).is_none()
+            && let Some(operator) = self.find_operator(true)
+            && !self.find_operator_end(operator.end)
+        {
+            self.offset = operator.end;
+            self.last_frame_mut().operators.push(operator);
+            return Ok(None);
+        }
+
+        match self.peek() {
+            Some(b'(') if self.operators.is_some() => {
+                self.offset += 1;
+                self.frame_stack
+                    .push(ExpressionFrame::new(FrameKind::Group));
+            }
+            Some(b'0'..=b'9') => {
+                let number = self.parse_number()?;
+                self.finish_parsing_operand(true);
+                return Ok(Some(ParseTerm::Number(number)));
+            }
+            Some(_) => {
+                let atom = self.parse_atom()?;
+                if self.peek() == Some(b'(') {
+                    self.offset += 1;
+                    self.frame_stack
+                        .push(ExpressionFrame::new(FrameKind::Arguments {
+                            functor: atom,
+                            argument_count: 0,
+                        }));
+                } else {
+                    self.finish_parsing_operand(false);
+                    return Ok(Some(ParseTerm::Atom(atom)));
+                }
+            }
+            None => return Err(TermError::UnexpectedEndOfFile),
+        }
+        Ok(None)
+    }
+
+    fn step_operator(&mut self) -> Result<Option<ParseTerm<'a>>, TermError> {
+        if let Some(operator) = self.find_operator(false) {
+            let frame = self.last_frame();
+            if frame.operators.last().is_some_and(|previous| {
+                previous.precedence < operator.precedence
+                    || (previous.precedence == operator.precedence
+                        && operator.class == OperatorClass::Yfx)
+            }) {
+                return self.reduce_operator().map(Some);
+            }
+
+            if frame.operators.last().is_some_and(|previous| {
+                previous.precedence == operator.precedence
+                    && previous.class == OperatorClass::Xfx
+                    && operator.class == OperatorClass::Xfx
+            }) {
+                self.offset = operator.offset;
+                return Err(TermError::UnexpectedCharacter);
+            }
+
+            self.offset = operator.end;
+            self.last_frame_mut().operators.push(operator);
+            self.state = TermParserState::Operand;
+
+            return Ok(None);
+        }
+
+        if !self.last_frame().operators.is_empty() {
+            return self.reduce_operator().map(Some);
+        }
+
+        let operand = self.last_frame_mut().operands.pop().expect("an operand");
+        match &mut self.last_frame_mut().kind {
+            FrameKind::Root { start } => {
+                if operand.is_number {
+                    self.offset = *start;
+                    return Err(TermError::UnexpectedCharacter);
+                }
+
+                match self.peek() {
+                    Some(byte) if byte == self.terminator => self.state = TermParserState::Done,
+                    Some(b';') => self.state = TermParserState::AwaitingFact,
+                    Some(_) => return Err(TermError::UnexpectedCharacter),
+                    None => return Err(TermError::UnexpectedEndOfFile),
+                }
+
+                self.offset += 1;
+                self.frame_stack.clear();
+
+                Ok(Some(ParseTerm::FactEnd))
+            }
+            FrameKind::Group => {
+                match self.peek() {
+                    Some(b')') => self.offset += 1,
+                    Some(_) => return Err(TermError::UnexpectedCharacter),
+                    None => return Err(TermError::UnexpectedEndOfFile),
+                }
+
+                self.frame_stack.pop();
+                self.last_frame_mut().operands.push(Operand {
+                    precedence: 0,
+                    ..operand
+                });
+
+                Ok(None)
+            }
+            FrameKind::Arguments { .. } => match self.peek() {
+                Some(b',') => {
+                    self.offset += 1;
+
+                    if let FrameKind::Arguments { argument_count, .. } =
+                        &mut self.last_frame_mut().kind
+                    {
+                        *argument_count += 1;
+                    }
+
+                    self.state = TermParserState::Operand;
+                    Ok(None)
+                }
+                Some(b')') => {
+                    self.offset += 1;
+
+                    let frame = self.pop_frame();
+                    let FrameKind::Arguments {
+                        functor,
+                        argument_count,
+                    } = frame.kind
+                    else {
+                        unreachable!()
+                    };
+
+                    self.finish_parsing_operand(false);
+                    Ok(Some(ParseTerm::Compound(functor, argument_count + 1)))
+                }
+                Some(_) => Err(TermError::UnexpectedCharacter),
+                None => Err(TermError::UnexpectedEndOfFile),
+            },
+        }
+    }
+
+    fn reduce_operator(&mut self) -> Result<ParseTerm<'a>, TermError> {
+        let frame = self.last_frame_mut();
+        let operator = frame.operators.pop().expect("an operator");
+        let right = frame.operands.pop().expect("right operand");
+        let right_limit = match operator.class {
+            OperatorClass::Xfx | OperatorClass::Yfx => operator.precedence - 1,
+            OperatorClass::Xfy | OperatorClass::Fy => operator.precedence,
+        };
+        if right.precedence > right_limit {
+            self.offset = operator.offset;
+            return Err(TermError::UnexpectedCharacter);
+        }
+
+        let arity = if operator.class.is_prefix() { 1 } else { 2 };
+        if !operator.class.is_prefix() {
+            let left = frame.operands.pop().expect("left operand");
+            let left_limit = if operator.class == OperatorClass::Yfx {
+                operator.precedence
+            } else {
+                operator.precedence - 1
+            };
+            if left.precedence > left_limit {
+                self.offset = operator.offset;
+                return Err(TermError::UnexpectedCharacter);
+            }
+        }
+        frame.operands.push(Operand {
+            precedence: operator.precedence,
+            is_number: false,
+        });
+        Ok(ParseTerm::Compound(operator.atom, arity))
     }
 }
 
@@ -412,3 +606,72 @@ impl<'a> Iterator for TermParser<'a> {
 }
 
 impl FusedIterator for TermParser<'_> {}
+
+fn scan_trivia(source: &str, mut offset: usize) -> Result<usize, (TermError, usize)> {
+    loop {
+        while source
+            .as_bytes()
+            .get(offset)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            offset += 1;
+        }
+        if !source[offset..].starts_with("/*") {
+            return Ok(offset);
+        }
+
+        let Some(end) = source[offset + 2..].find("*/") else {
+            return Err((TermError::UnterminatedComment, offset));
+        };
+        offset += end + 4;
+    }
+}
+
+fn scan_compound_start(source: &str, offset: usize) -> Option<usize> {
+    let end = scan_ident(source, offset)?;
+    (source.as_bytes().get(end) == Some(&b'(')).then_some(end + 1)
+}
+
+fn scan_operator<'a>(
+    source: &'a str,
+    offset: usize,
+    operators: &OperatorConfig<'a>,
+    prefix: bool,
+) -> Option<PendingOperator<'a>> {
+    let end = scan_ident(source, offset)?;
+    let name = &source[offset..end];
+    let operator = operators.get(name, prefix)?;
+    Some(PendingOperator {
+        atom: ParseAtom {
+            body: name,
+            quoted: false,
+        },
+        precedence: operator.precedence,
+        class: operator.class,
+        offset,
+        end,
+    })
+}
+
+fn scan_operator_end<'a>(
+    source: &'a str,
+    offset: usize,
+    terminator: u8,
+    operators: Option<&OperatorConfig<'a>>,
+) -> bool {
+    let Ok(offset) = scan_trivia(source, offset) else {
+        return false;
+    };
+
+    match source.as_bytes().get(offset).copied() {
+        None | Some(b')' | b',' | b';') => true,
+        Some(byte) => {
+            byte == terminator
+                || (scan_compound_start(source, offset).is_none()
+                    && operators.is_some_and(|operators| {
+                        scan_operator(source, offset, operators, false).is_some()
+                            && scan_operator(source, offset, operators, true).is_none()
+                    }))
+        }
+    }
+}

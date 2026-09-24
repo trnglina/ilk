@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use crate::parser::{
     ident::{is_word_ident_start, scan_word_ident},
+    operator::OperatorConfig,
     term::{ParseTerm, TermError, TermParser},
 };
 
@@ -154,6 +155,7 @@ enum ProseParserState<'a> {
 
 pub struct ProseParser<'a> {
     source: &'a str,
+    operators: Option<&'a OperatorConfig<'a>>,
     offset: usize,
     next_region_id: usize,
     labeled_region_map: HashMap<&'a str, Region>,
@@ -163,9 +165,10 @@ pub struct ProseParser<'a> {
 }
 
 impl<'a> ProseParser<'a> {
-    pub fn new(source: &'a str) -> Self {
+    pub fn new(source: &'a str, operators: Option<&'a OperatorConfig<'a>>) -> Self {
         Self {
             source,
+            operators,
             offset: 0,
             next_region_id: 0,
             labeled_region_map: HashMap::new(),
@@ -409,7 +412,7 @@ impl<'a> ProseParser<'a> {
     ) {
         self.offset = body_start;
         self.state = ProseParserState::EmittingFacts {
-            parser: TermParser::new(&self.source[body_start..], terminator),
+            parser: TermParser::new(&self.source[body_start..], terminator, self.operators),
             base: body_start,
             cont,
         };

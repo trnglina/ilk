@@ -40,7 +40,9 @@ pub fn scan_ident(source: &str, offset: usize) -> Option<usize> {
         byte if is_word_ident_start(byte) => Some(scan_word_ident(source, offset)),
         byte if is_symbol(byte) => {
             let mut end = offset + 1;
-            while bytes.get(end).is_some_and(|byte| is_symbol(*byte)) {
+            while bytes.get(end).is_some_and(|byte| is_symbol(*byte))
+                && !source[end..].starts_with("/*")
+            {
                 end += 1;
             }
             Some(end)

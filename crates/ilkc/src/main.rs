@@ -30,7 +30,7 @@ enum Format {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let source = fs::read_to_string(&cli.file)?;
-    let parser = ProseParser::new(&source);
+    let parser = ProseParser::new(&source, None);
     let compiler = Compiler::new(parser);
     let mut writer = match cli.format {
         Format::Souffle => SouffleWriter::new(compiler, &cli.out_dir),
