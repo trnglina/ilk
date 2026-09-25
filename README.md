@@ -134,3 +134,7 @@ one
 two
 three
 ```
+
+## AI Use
+
+The code in this repository is, in part, AI-generated. All generated code is reviewed and revised by a human. All documentation and prose is written by a human.
