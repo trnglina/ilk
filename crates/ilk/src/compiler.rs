@@ -32,6 +32,19 @@ impl RegionId {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AssertionId(u32);
+
+impl AssertionId {
+    pub fn new(id: usize) -> Self {
+        Self(u32::try_from(id).expect("id fits in u32"))
+    }
+
+    pub fn value(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TermId(u32);
 
 impl TermId {
@@ -49,7 +62,8 @@ pub enum CompilerEvent<'s, AtomT> {
     Text(&'s str),
     RegionStart(RegionId, u32),
     RegionEnd(RegionId, u32),
-    Assertion(TermId, RegionId),
+    Assertion(AssertionId, TermId),
+    AssertionRegion(AssertionId, u32, RegionId),
     Parent(RegionId, RegionId),
     Ancestor(RegionId, RegionId),
     Atom(TermId, AtomT),
@@ -59,18 +73,38 @@ pub enum CompilerEvent<'s, AtomT> {
     Argument(TermId, u32, TermId),
 }
 
-enum Pending {
-    Compound(Term),
-    Arguments {
+struct Annotation {
+    assertions: Vec<AssertionId>,
+    region: RegionId,
+    index: u32,
+}
+
+#[derive(Clone, Copy)]
+enum AfterRegionClose {
+    Read,
+    ContinueAnnotation(usize),
+}
+
+enum CompilerState {
+    Reading,
+    EmittingAssertionRegion(AssertionId, u32, RegionId),
+    EmittingAssociations {
+        annotation: usize,
+        position: usize,
+    },
+    EmittingCompound(Term),
+    EmittingArguments {
         id: TermId,
         compound: CompoundHandle,
         position: usize,
     },
-    Close {
+    ClosingRegion {
         id: RegionId,
         children: vec::IntoIter<RegionId>,
         last_outer: Option<RegionId>,
+        continuation: AfterRegionClose,
     },
+    Done,
 }
 
 pub struct Compiler<'s> {
@@ -79,10 +113,12 @@ pub struct Compiler<'s> {
     term_ids: HashMap<Term, TermId>,
     term_stack: Vec<Term>,
     region_map: BTreeMap<RegionId, Vec<RegionId>>,
-    current_region: Option<RegionId>,
+    annotations: HashMap<usize, Annotation>,
+    current_annotation: Option<usize>,
+    next_region_id: usize,
+    next_assertion_id: usize,
     text_offset: u32,
-    pending: Option<Pending>,
-    done: bool,
+    state: CompilerState,
 }
 
 impl<'s> Compiler<'s> {
@@ -93,16 +129,18 @@ impl<'s> Compiler<'s> {
             term_ids: HashMap::new(),
             term_stack: Vec::new(),
             region_map: BTreeMap::new(),
-            current_region: None,
+            annotations: HashMap::new(),
+            current_annotation: None,
+            next_region_id: 0,
+            next_assertion_id: 0,
             text_offset: 0,
-            pending: None,
-            done: false,
+            state: CompilerState::Reading,
         }
     }
 
     pub fn next(&mut self) -> Option<Result<CompilerEvent<'s, &str>, CompilerError>> {
         loop {
-            if self.done {
+            if matches!(self.state, CompilerState::Done) {
                 return None;
             }
 
@@ -112,23 +150,20 @@ impl<'s> Compiler<'s> {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    self.done = true;
+                    self.state = CompilerState::Done;
                     return Some(Err(error));
                 }
             }
         }
     }
 
-    fn step(&mut self) -> Result<Option<CompilerEvent<'s, AtomHandle>>, CompilerError> {
-        if let Some(event) = self.drain_pending()? {
-            return Ok(Some(event));
-        }
-
+    fn read_chunk(&mut self) -> Result<Option<CompilerEvent<'s, AtomHandle>>, CompilerError> {
         let Some(chunk) = self.parser.next() else {
             debug_assert!(self.region_map.is_empty());
+            debug_assert!(self.annotations.is_empty());
             debug_assert!(self.term_stack.is_empty());
 
-            self.done = true;
+            self.state = CompilerState::Done;
             return Ok(None);
         };
 
@@ -152,21 +187,29 @@ impl<'s> Compiler<'s> {
                     self.text_offset + u32::try_from(text.len()).expect("text offset fits in u32");
                 Some(CompilerEvent::Text(text))
             }
-            ProseChunk::RegionStart { id } => {
-                let id = RegionId::new(id);
-                self.region_map.insert(id, Vec::default());
-                self.current_region = Some(id);
-                Some(CompilerEvent::RegionStart(id, self.text_offset))
-            }
-            ProseChunk::RegionEnd { id } => {
-                let id = RegionId::new(id);
-                let children = self.region_map.remove(&id).expect("well-formed region");
-                self.pending = Some(Pending::Close {
+            ProseChunk::AnnotationStart { id } => {
+                let region = self.open_region();
+                self.annotations.insert(
                     id,
-                    children: children.into_iter(),
-                    last_outer: None,
-                });
-                Some(CompilerEvent::RegionEnd(id, self.text_offset))
+                    Annotation {
+                        assertions: Vec::new(),
+                        region,
+                        index: 0,
+                    },
+                );
+                self.current_annotation = Some(id);
+                Some(CompilerEvent::RegionStart(region, self.text_offset))
+            }
+            ProseChunk::AnnotationEnd { id } => {
+                let annotation = self
+                    .annotations
+                    .remove(&id)
+                    .expect("well-formed annotation");
+                Some(self.close_region(annotation.region, AfterRegionClose::Read))
+            }
+            ProseChunk::AnnotationSplit { id } => {
+                let region = self.annotations[&id].region;
+                Some(self.close_region(region, AfterRegionClose::ContinueAnnotation(id)))
             }
             ProseChunk::TermEvent(event) => match event {
                 ParseTerm::Atom(atom) => {
@@ -190,7 +233,7 @@ impl<'s> Compiler<'s> {
                     self.term_stack.truncate(start);
                     self.term_stack.push(term);
                     if let Some(event) = self.generate_term_event(Term::Atom(functor))? {
-                        self.pending = Some(Pending::Compound(term));
+                        self.state = CompilerState::EmittingCompound(term);
                         Some(event)
                     } else {
                         self.generate_term_event(term)?
@@ -199,11 +242,44 @@ impl<'s> Compiler<'s> {
                 ParseTerm::FactEnd => {
                     let term = self.term_stack.pop().expect("fact has a root");
                     debug_assert!(self.term_stack.is_empty());
-                    let region = self.current_region.expect("fact has a region");
-                    Some(CompilerEvent::Assertion(self.term_ids[&term], region))
+                    let id = AssertionId::new(self.next_assertion_id);
+                    self.next_assertion_id += 1;
+                    let annotation = self
+                        .annotations
+                        .get_mut(&self.current_annotation.expect("fact has an annotation"))
+                        .expect("open annotation");
+                    annotation.assertions.push(id);
+                    self.state = CompilerState::EmittingAssertionRegion(
+                        id,
+                        annotation.index,
+                        annotation.region,
+                    );
+                    Some(CompilerEvent::Assertion(id, self.term_ids[&term]))
                 }
             },
         })
+    }
+
+    fn open_region(&mut self) -> RegionId {
+        let id = RegionId::new(self.next_region_id);
+        self.next_region_id += 1;
+        self.region_map.insert(id, Vec::new());
+        id
+    }
+
+    fn close_region(
+        &mut self,
+        id: RegionId,
+        continuation: AfterRegionClose,
+    ) -> CompilerEvent<'s, AtomHandle> {
+        let children = self.region_map.remove(&id).expect("well-formed region");
+        self.state = CompilerState::ClosingRegion {
+            id,
+            children: children.into_iter(),
+            last_outer: None,
+            continuation,
+        };
+        CompilerEvent::RegionEnd(id, self.text_offset)
     }
 
     fn generate_term_event(
@@ -225,28 +301,45 @@ impl<'s> Compiler<'s> {
             Term::Compound(compound) => {
                 let (functor, _) = self.term_table.compound_value(compound);
                 let functor = self.term_ids[&Term::Atom(functor)];
-                self.pending = Some(Pending::Arguments {
+                self.state = CompilerState::EmittingArguments {
                     id,
                     compound,
                     position: 0,
-                });
+                };
                 CompilerEvent::Compound(id, functor)
             }
         }))
     }
 
-    fn drain_pending(&mut self) -> Result<Option<CompilerEvent<'s, AtomHandle>>, CompilerError> {
-        if let Some(Pending::Compound(term)) = self.pending {
-            self.pending = None;
-            return self.generate_term_event(term);
-        }
-        let Some(pending) = self.pending.as_mut() else {
-            return Ok(None);
-        };
-
-        match pending {
-            Pending::Compound(_) => unreachable!(),
-            Pending::Arguments {
+    fn step(&mut self) -> Result<Option<CompilerEvent<'s, AtomHandle>>, CompilerError> {
+        match &mut self.state {
+            CompilerState::Reading => return self.read_chunk(),
+            CompilerState::Done => return Ok(None),
+            CompilerState::EmittingAssertionRegion(id, index, region) => {
+                let event = CompilerEvent::AssertionRegion(*id, *index, *region);
+                self.state = CompilerState::Reading;
+                return Ok(Some(event));
+            }
+            CompilerState::EmittingCompound(term) => {
+                let term = *term;
+                self.state = CompilerState::Reading;
+                return self.generate_term_event(term);
+            }
+            CompilerState::EmittingAssociations {
+                annotation,
+                position,
+            } => {
+                let annotation = &self.annotations[annotation];
+                if let Some(&id) = annotation.assertions.get(*position) {
+                    *position += 1;
+                    return Ok(Some(CompilerEvent::AssertionRegion(
+                        id,
+                        annotation.index,
+                        annotation.region,
+                    )));
+                }
+            }
+            CompilerState::EmittingArguments {
                 id,
                 compound,
                 position,
@@ -262,10 +355,11 @@ impl<'s> Compiler<'s> {
                     )));
                 }
             }
-            Pending::Close {
+            CompilerState::ClosingRegion {
                 id,
                 children,
                 last_outer,
+                continuation,
             } => {
                 if let Some(child) = children.next() {
                     return Ok(Some(CompilerEvent::Parent(*id, child)));
@@ -283,9 +377,26 @@ impl<'s> Compiler<'s> {
                     *last_outer = Some(outer);
                     return Ok(Some(CompilerEvent::Ancestor(outer, *id)));
                 }
+                if let AfterRegionClose::ContinueAnnotation(annotation_id) = *continuation {
+                    let region = self.open_region();
+                    let annotation = self
+                        .annotations
+                        .get_mut(&annotation_id)
+                        .expect("open annotation");
+                    annotation.region = region;
+                    annotation.index = annotation
+                        .index
+                        .checked_add(1)
+                        .expect("region index fits in u32");
+                    self.state = CompilerState::EmittingAssociations {
+                        annotation: annotation_id,
+                        position: 0,
+                    };
+                    return Ok(Some(CompilerEvent::RegionStart(region, self.text_offset)));
+                }
             }
         }
-        self.pending = None;
+        self.state = CompilerState::Reading;
         Ok(None)
     }
 }

@@ -16,10 +16,12 @@ pub enum ProseError {
     InvalidIndentation,
     #[error("unexpected character")]
     UnexpectedCharacter,
-    #[error("no matching region start")]
-    UnmatchedRegionEnd,
-    #[error("no matching region end")]
-    UnmatchedRegionStart,
+    #[error("no matching annotation start")]
+    UnmatchedAnnotationEnd,
+    #[error("no matching annotation end")]
+    UnmatchedAnnotationStart,
+    #[error("no annotation to split")]
+    UnmatchedAnnotationSplit,
     #[error(transparent)]
     Term(#[from] TermError),
 }
@@ -27,8 +29,9 @@ pub enum ProseError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProseChunk<'a> {
     Text(&'a str),
-    RegionStart { id: usize },
-    RegionEnd { id: usize },
+    AnnotationStart { id: usize },
+    AnnotationEnd { id: usize },
+    AnnotationSplit { id: usize },
     TermEvent(ParseTerm<'a>),
 }
 
@@ -42,13 +45,13 @@ impl<'a> ProseChunk<'a> {
     }
 }
 
-struct Region {
+struct Annotation {
     id: usize,
     marker_start: usize,
 }
 
 struct Block<'a> {
-    region: Region,
+    annotation: Annotation,
     indent: Option<&'a str>,
 }
 
@@ -65,6 +68,11 @@ enum Marker<'a> {
         label: Option<&'a str>,
         marker_start: usize,
         body_start: usize,
+    },
+    Split {
+        label: Option<&'a str>,
+        marker_start: usize,
+        marker_end: usize,
     },
     RegionClose {
         label: Option<&'a str>,
@@ -90,6 +98,7 @@ impl Marker<'_> {
             | Marker::PointStart { marker_start, .. }
             | Marker::RegionOpenStart { marker_start, .. }
             | Marker::RegionClose { marker_start, .. }
+            | Marker::Split { marker_start, .. }
             | Marker::BlockOpenStart { marker_start, .. }
             | Marker::BlockClose { marker_start }
             | Marker::Invalid { marker_start } => marker_start,
@@ -157,9 +166,9 @@ pub struct ProseParser<'a> {
     source: &'a str,
     operators: Option<&'a OperatorConfig<'a>>,
     offset: usize,
-    next_region_id: usize,
-    labeled_region_map: HashMap<&'a str, Region>,
-    anonymous_region_stack: Vec<Region>,
+    next_annotation_id: usize,
+    labeled_annotation_map: HashMap<&'a str, Annotation>,
+    anonymous_annotation_stack: Vec<Annotation>,
     block_stack: Vec<Block<'a>>,
     state: ProseParserState<'a>,
 }
@@ -170,9 +179,9 @@ impl<'a> ProseParser<'a> {
             source,
             operators,
             offset: 0,
-            next_region_id: 0,
-            labeled_region_map: HashMap::new(),
-            anonymous_region_stack: Vec::new(),
+            next_annotation_id: 0,
+            labeled_annotation_map: HashMap::new(),
+            anonymous_annotation_stack: Vec::new(),
             block_stack: Vec::new(),
             state: ProseParserState::Idle,
         }
@@ -235,9 +244,9 @@ impl<'a> ProseParser<'a> {
         }
     }
 
-    fn new_region_id(&mut self) -> usize {
-        let id = self.next_region_id;
-        self.next_region_id += 1;
+    fn new_annotation_id(&mut self) -> usize {
+        let id = self.next_annotation_id;
+        self.next_annotation_id += 1;
         id
     }
 
@@ -270,16 +279,16 @@ impl<'a> ProseParser<'a> {
         match boundary {
             TextBoundary::EndOfFile => {
                 let unclosed = self
-                    .anonymous_region_stack
+                    .anonymous_annotation_stack
                     .iter()
-                    .chain(self.labeled_region_map.values())
-                    .chain(self.block_stack.iter().map(|block| &block.region))
-                    .max_by_key(|region| region.id)
-                    .map(|region| region.marker_start);
+                    .chain(self.labeled_annotation_map.values())
+                    .chain(self.block_stack.iter().map(|block| &block.annotation))
+                    .max_by_key(|annotation| annotation.id)
+                    .map(|annotation| annotation.marker_start);
 
                 if let Some(opening) = unclosed {
                     self.offset = opening;
-                    return Err(ProseError::UnmatchedRegionStart);
+                    return Err(ProseError::UnmatchedAnnotationStart);
                 }
 
                 self.state = ProseParserState::Done;
@@ -314,57 +323,79 @@ impl<'a> ProseParser<'a> {
             }
             Marker::PointStart { body_start, .. } => {
                 let id = self.begin_parsing_point(body_start)?;
-                Ok(Some(ProseChunk::RegionStart { id }))
+                Ok(Some(ProseChunk::AnnotationStart { id }))
             }
             Marker::RegionOpenStart {
                 label,
                 marker_start,
                 body_start,
             } => {
-                let id = self.begin_parsing_region(label, marker_start, body_start)?;
-                Ok(Some(ProseChunk::RegionStart { id }))
+                let id = self.begin_parsing_annotation(label, marker_start, body_start)?;
+                Ok(Some(ProseChunk::AnnotationStart { id }))
+            }
+            Marker::Split {
+                label,
+                marker_start,
+                marker_end,
+            } => {
+                let annotation = match label {
+                    Some(label) => self.labeled_annotation_map.get(label),
+                    None => self
+                        .anonymous_annotation_stack
+                        .last()
+                        .into_iter()
+                        .chain(self.block_stack.last().map(|block| &block.annotation))
+                        .max_by_key(|annotation| annotation.id),
+                };
+                let Some(annotation) = annotation else {
+                    self.offset = marker_start;
+                    return Err(ProseError::UnmatchedAnnotationSplit);
+                };
+                let id = annotation.id;
+                self.offset = marker_end;
+                Ok(Some(ProseChunk::AnnotationSplit { id }))
             }
             Marker::RegionClose {
                 label,
                 marker_start,
                 marker_end,
             } => {
-                let region = match label {
-                    Some(label) => self.labeled_region_map.remove(label),
-                    None => self.anonymous_region_stack.pop(),
+                let annotation = match label {
+                    Some(label) => self.labeled_annotation_map.remove(label),
+                    None => self.anonymous_annotation_stack.pop(),
                 };
 
-                let Some(region) = region else {
+                let Some(annotation) = annotation else {
                     self.offset = marker_start;
-                    return Err(ProseError::UnmatchedRegionEnd);
+                    return Err(ProseError::UnmatchedAnnotationEnd);
                 };
 
                 self.offset = marker_end;
-                Ok(Some(ProseChunk::RegionEnd { id: region.id }))
+                Ok(Some(ProseChunk::AnnotationEnd { id: annotation.id }))
             }
             Marker::BlockOpenStart {
                 marker_start,
                 body_start,
             } => {
-                let id = self.new_region_id();
+                let id = self.new_annotation_id();
                 self.begin_parsing_facts(
                     body_start,
                     b'|',
                     MarkerContinuation::BlockOpenEnd { id, marker_start },
                 );
-                Ok(Some(ProseChunk::RegionStart { id }))
+                Ok(Some(ProseChunk::AnnotationStart { id }))
             }
             Marker::BlockClose { marker_start } => {
-                let region = self.block_stack.pop().map(|block| block.region);
+                let annotation = self.block_stack.pop().map(|block| block.annotation);
 
-                let Some(region) = region else {
+                let Some(annotation) = annotation else {
                     self.offset = marker_start;
-                    return Err(ProseError::UnmatchedRegionEnd);
+                    return Err(ProseError::UnmatchedAnnotationEnd);
                 };
 
                 self.offset = marker_start + 2;
                 self.state = ProseParserState::FinishingBlockEnd;
-                Ok(Some(ProseChunk::RegionEnd { id: region.id }))
+                Ok(Some(ProseChunk::AnnotationEnd { id: annotation.id }))
             }
             Marker::Invalid { marker_start } => {
                 self.offset = marker_start;
@@ -374,23 +405,23 @@ impl<'a> ProseParser<'a> {
     }
 
     fn begin_parsing_point(&mut self, body_start: usize) -> Result<usize, ProseError> {
-        let id = self.new_region_id();
+        let id = self.new_annotation_id();
         self.begin_parsing_facts(body_start, b'}', MarkerContinuation::PointEnd { id });
         Ok(id)
     }
 
-    fn begin_parsing_region(
+    fn begin_parsing_annotation(
         &mut self,
         label: Option<&'a str>,
         marker_start: usize,
         body_start: usize,
     ) -> Result<usize, ProseError> {
-        if label.is_some_and(|label| self.labeled_region_map.contains_key(label)) {
+        if label.is_some_and(|label| self.labeled_annotation_map.contains_key(label)) {
             self.offset = marker_start;
             return Err(ProseError::ConflictingRegionLabel);
         }
 
-        let id = self.new_region_id();
+        let id = self.new_annotation_id();
         self.begin_parsing_facts(
             body_start,
             b'|',
@@ -450,25 +481,25 @@ impl<'a> ProseParser<'a> {
         cont: MarkerContinuation<'a>,
     ) -> Result<Option<ProseChunk<'a>>, ProseError> {
         match cont {
-            MarkerContinuation::PointEnd { id } => Ok(Some(ProseChunk::RegionEnd { id })),
+            MarkerContinuation::PointEnd { id } => Ok(Some(ProseChunk::AnnotationEnd { id })),
             MarkerContinuation::RegionOpenEnd {
                 id,
                 label,
                 marker_start,
             } => {
-                let region = Region { id, marker_start };
+                let annotation = Annotation { id, marker_start };
                 match label {
                     Some(label) => {
-                        self.labeled_region_map.insert(label, region);
+                        self.labeled_annotation_map.insert(label, annotation);
                     }
-                    None => self.anonymous_region_stack.push(region),
+                    None => self.anonymous_annotation_stack.push(annotation),
                 }
                 Ok(None)
             }
             MarkerContinuation::BlockOpenEnd { id, marker_start } => {
                 self.skip_block_marker_line_end()?;
                 self.block_stack.push(Block {
-                    region: Region { id, marker_start },
+                    annotation: Annotation { id, marker_start },
                     indent: None,
                 });
                 Ok(None)
@@ -637,6 +668,12 @@ fn scan_marker<'a>(source: &'a str, offset: usize) -> Marker<'a> {
             marker_start: offset,
             body_start: offset + 2,
         }
+    } else if rest.starts_with('|') {
+        Marker::Split {
+            label: None,
+            marker_start: offset,
+            marker_end: offset + 2,
+        }
     } else if rest.starts_with('>') {
         Marker::RegionClose {
             label: None,
@@ -660,6 +697,11 @@ fn scan_marker<'a>(source: &'a str, offset: usize) -> Marker<'a> {
                 label,
                 marker_start: offset,
                 body_start: label_end + 1,
+            },
+            Some(b'|') => Marker::Split {
+                label,
+                marker_start: offset,
+                marker_end: label_end + 1,
             },
             Some(b'>') => Marker::RegionClose {
                 label,

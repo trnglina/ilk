@@ -22,6 +22,7 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
         let mut region_start_table = create_writer(self.out_dir, "region_start.facts")?;
         let mut region_end_table = create_writer(self.out_dir, "region_end.facts")?;
         let mut assertion_table = create_writer(self.out_dir, "assertion.facts")?;
+        let mut assertion_region_table = create_writer(self.out_dir, "assertion_region.facts")?;
         let mut parent_table = create_writer(self.out_dir, "parent.facts")?;
         let mut ancestor_table = create_writer(self.out_dir, "ancestor.facts")?;
         let mut atom_table = create_writer(self.out_dir, "atom.facts")?; // .input atom(rfc4180=true)
@@ -39,9 +40,15 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
                 CompilerEvent::RegionEnd(id, offset) => {
                     writeln!(region_end_table, "{}\t{offset}", id.value())?
                 }
-                CompilerEvent::Assertion(term, region) => {
-                    writeln!(assertion_table, "{}\t{}", term.value(), region.value())?
+                CompilerEvent::Assertion(id, term) => {
+                    writeln!(assertion_table, "{}\t{}", id.value(), term.value())?
                 }
+                CompilerEvent::AssertionRegion(id, index, region) => writeln!(
+                    assertion_region_table,
+                    "{}\t{index}\t{}",
+                    id.value(),
+                    region.value()
+                )?,
                 CompilerEvent::Parent(outer, inner) => {
                     writeln!(parent_table, "{}\t{}", outer.value(), inner.value())?
                 }
@@ -74,6 +81,7 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
             &mut region_start_table,
             &mut region_end_table,
             &mut assertion_table,
+            &mut assertion_region_table,
             &mut parent_table,
             &mut ancestor_table,
             &mut atom_table,
