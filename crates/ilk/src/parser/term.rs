@@ -103,12 +103,20 @@ pub enum ParseTerm<'a> {
     Atom(ParseAtom<'a>),
     Number(ParseNumber),
     Compound(ParseAtom<'a>, usize),
+    Sequence(usize),
     FactEnd,
+}
+
+enum OperandKind {
+    Atom,
+    Number,
+    Compound,
+    Sequence,
 }
 
 struct Operand {
     precedence: u16,
-    is_number: bool,
+    kind: OperandKind,
 }
 
 struct PendingOperator<'a> {
@@ -124,6 +132,9 @@ enum FrameKind<'a> {
         start: usize,
     },
     Group,
+    Sequence {
+        element_count: usize,
+    },
     Arguments {
         functor: ParseAtom<'a>,
         argument_count: usize,
@@ -352,10 +363,10 @@ impl<'a> TermParser<'a> {
         Ok(None)
     }
 
-    fn finish_parsing_operand(&mut self, is_number: bool) {
+    fn finish_parsing_operand(&mut self, kind: OperandKind) {
         self.last_frame_mut().operands.push(Operand {
             precedence: 0,
-            is_number,
+            kind,
         });
         self.state = TermParserState::Operator;
     }
@@ -371,7 +382,7 @@ impl<'a> TermParser<'a> {
             && self.peekn(1).is_some_and(|b| b.is_ascii_digit())
         {
             let number = self.parse_number()?;
-            self.finish_parsing_operand(true);
+            self.finish_parsing_operand(OperandKind::Number);
             return Ok(Some(ParseTerm::Number(number)));
         }
 
@@ -385,6 +396,24 @@ impl<'a> TermParser<'a> {
         }
 
         match self.peek() {
+            Some(b'[') => {
+                self.offset += 1;
+                self.frame_stack
+                    .push(ExpressionFrame::new(FrameKind::Sequence {
+                        element_count: 0,
+                    }));
+            }
+            Some(b']')
+                if matches!(
+                    self.last_frame().kind,
+                    FrameKind::Sequence { element_count: 0 }
+                ) && self.last_frame().operators.is_empty() =>
+            {
+                self.offset += 1;
+                self.pop_frame();
+                self.finish_parsing_operand(OperandKind::Sequence);
+                return Ok(Some(ParseTerm::Sequence(0)));
+            }
             Some(b'(') if self.operators.is_some() => {
                 self.offset += 1;
                 self.frame_stack
@@ -392,7 +421,7 @@ impl<'a> TermParser<'a> {
             }
             Some(b'0'..=b'9') => {
                 let number = self.parse_number()?;
-                self.finish_parsing_operand(true);
+                self.finish_parsing_operand(OperandKind::Number);
                 return Ok(Some(ParseTerm::Number(number)));
             }
             Some(_) => {
@@ -405,7 +434,7 @@ impl<'a> TermParser<'a> {
                             argument_count: 0,
                         }));
                 } else {
-                    self.finish_parsing_operand(false);
+                    self.finish_parsing_operand(OperandKind::Atom);
                     return Ok(Some(ParseTerm::Atom(atom)));
                 }
             }
@@ -448,7 +477,7 @@ impl<'a> TermParser<'a> {
         let operand = self.last_frame_mut().operands.pop().expect("an operand");
         match &mut self.last_frame_mut().kind {
             FrameKind::Root { start } => {
-                if operand.is_number {
+                if !matches!(operand.kind, OperandKind::Atom | OperandKind::Compound) {
                     self.offset = *start;
                     return Err(TermError::UnexpectedCharacter);
                 }
@@ -485,6 +514,26 @@ impl<'a> TermParser<'a> {
 
                 Ok(None)
             }
+            FrameKind::Sequence { .. } => match self.peek() {
+                Some(b',') => {
+                    self.offset += 1;
+                    if let FrameKind::Sequence { element_count } = &mut self.last_frame_mut().kind {
+                        *element_count += 1;
+                    }
+                    self.state = TermParserState::Operand;
+                    Ok(None)
+                }
+                Some(b']') => {
+                    self.offset += 1;
+                    let FrameKind::Sequence { element_count } = self.pop_frame().kind else {
+                        unreachable!()
+                    };
+                    self.finish_parsing_operand(OperandKind::Sequence);
+                    Ok(Some(ParseTerm::Sequence(element_count + 1)))
+                }
+                Some(_) => Err(TermError::UnexpectedCharacter),
+                None => Err(TermError::UnexpectedEndOfFile),
+            },
             FrameKind::Arguments { .. } => match self.peek() {
                 Some(b',') => {
                     self.offset += 1;
@@ -510,7 +559,7 @@ impl<'a> TermParser<'a> {
                         unreachable!()
                     };
 
-                    self.finish_parsing_operand(false);
+                    self.finish_parsing_operand(OperandKind::Compound);
                     Ok(Some(ParseTerm::Compound(functor, argument_count + 1)))
                 }
                 Some(_) => Err(TermError::UnexpectedCharacter),
@@ -547,7 +596,7 @@ impl<'a> TermParser<'a> {
         }
         frame.operands.push(Operand {
             precedence: operator.precedence,
-            is_number: false,
+            kind: OperandKind::Compound,
         });
         Ok(ParseTerm::Compound(operator.atom, arity))
     }
@@ -692,7 +741,7 @@ fn scan_operator_end<'a>(
     };
 
     match source.as_bytes().get(offset).copied() {
-        None | Some(b')' | b',' | b';') => true,
+        None | Some(b')' | b']' | b',' | b';') => true,
         Some(byte) => {
             Some(byte) == terminator
                 || (scan_compound_start(source, offset).is_none()

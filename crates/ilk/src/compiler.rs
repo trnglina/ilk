@@ -8,8 +8,8 @@ use functor_derive::Functor;
 use thiserror::Error;
 
 use crate::{
-    AtomHandle, CompoundHandle, IntoTerm, ParseTerm, ProseChunk, ProseError, ProseParser, Term,
-    TermTable,
+    AtomHandle, CompoundHandle, IntoTerm, ParseTerm, ProseChunk, ProseError, ProseParser,
+    SequenceHandle, Term, TermTable,
 };
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -71,6 +71,8 @@ pub enum CompilerEvent<'s, AtomT> {
     Real(TermId, f32),
     Compound(TermId, TermId),
     Argument(TermId, u32, TermId),
+    Sequence(TermId, u32),
+    Element(TermId, u32, TermId),
 }
 
 struct Annotation {
@@ -96,6 +98,11 @@ enum CompilerState {
     EmittingArguments {
         id: TermId,
         compound: CompoundHandle,
+        position: usize,
+    },
+    EmittingElements {
+        id: TermId,
+        sequence: SequenceHandle,
         position: usize,
     },
     ClosingRegion {
@@ -239,6 +246,13 @@ impl<'s> Compiler<'s> {
                         self.generate_term_event(term)?
                     }
                 }
+                ParseTerm::Sequence(length) => {
+                    let start = self.term_stack.len() - length;
+                    let term = Term::Sequence(self.term_table.sequence(&self.term_stack[start..]));
+                    self.term_stack.truncate(start);
+                    self.term_stack.push(term);
+                    self.generate_term_event(term)?
+                }
                 ParseTerm::FactEnd => {
                     let term = self.term_stack.pop().expect("fact has a root");
                     debug_assert!(self.term_stack.is_empty());
@@ -298,6 +312,16 @@ impl<'s> Compiler<'s> {
             Term::Atom(atom) => CompilerEvent::Atom(id, atom),
             Term::Integer(value) => CompilerEvent::Integer(id, value.value()),
             Term::Real(value) => CompilerEvent::Real(id, value.value()),
+            Term::Sequence(sequence) => {
+                let length = u32::try_from(self.term_table.sequence_value(sequence).len())
+                    .expect("sequence length fits in u32");
+                self.state = CompilerState::EmittingElements {
+                    id,
+                    sequence,
+                    position: 0,
+                };
+                CompilerEvent::Sequence(id, length)
+            }
             Term::Compound(compound) => {
                 let (functor, _) = self.term_table.compound_value(compound);
                 let functor = self.term_ids[&Term::Atom(functor)];
@@ -349,6 +373,22 @@ impl<'s> Compiler<'s> {
                     let index = u32::try_from(*position).expect("arg index fits in u32");
                     *position += 1;
                     return Ok(Some(CompilerEvent::Argument(
+                        *id,
+                        index,
+                        self.term_ids[term],
+                    )));
+                }
+            }
+            CompilerState::EmittingElements {
+                id,
+                sequence,
+                position,
+            } => {
+                let elements = self.term_table.sequence_value(*sequence);
+                if let Some(term) = elements.get(*position) {
+                    let index = u32::try_from(*position).expect("element index fits in u32");
+                    *position += 1;
+                    return Ok(Some(CompilerEvent::Element(
                         *id,
                         index,
                         self.term_ids[term],

@@ -44,17 +44,22 @@ pub struct AtomHandle(usize);
 pub struct CompoundHandle(usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SequenceHandle(usize);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Term {
     Integer(IntegerTerm),
     Real(RealTerm),
     Atom(AtomHandle),
     Compound(CompoundHandle),
+    Sequence(SequenceHandle),
 }
 
 #[derive(Default)]
 pub struct TermTable {
     atoms: InternTable<u8>,
     terms: InternTable<Term>,
+    sequences: InternTable<Term>,
 }
 
 impl TermTable {
@@ -72,6 +77,14 @@ impl TermTable {
         body.push(Term::Atom(functor));
         body.extend_from_slice(args);
         CompoundHandle(self.terms.intern(&body))
+    }
+
+    pub fn sequence(&mut self, elements: &[Term]) -> SequenceHandle {
+        SequenceHandle(self.sequences.intern(elements))
+    }
+
+    pub fn sequence_value(&self, sequence: SequenceHandle) -> &[Term] {
+        self.sequences.resolve(sequence.0)
     }
 
     pub fn atom_value(&self, atom: AtomHandle) -> &str {

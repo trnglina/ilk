@@ -31,6 +31,9 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
         let mut compound_table = create_writer(self.out_dir, "compound.facts")?;
         let mut argument_table = create_writer(self.out_dir, "argument.facts")?;
 
+        let mut sequence_table = create_writer(self.out_dir, "sequence.facts")?;
+        let mut element_table = create_writer(self.out_dir, "element.facts")?;
+
         while let Some(event) = self.compiler.next() {
             match event? {
                 CompilerEvent::Text(chunk) => text.write_all(chunk.as_bytes())?,
@@ -67,6 +70,15 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
                 CompilerEvent::Compound(id, functor) => {
                     writeln!(compound_table, "{}\t{}", id.value(), functor.value())?
                 }
+                CompilerEvent::Sequence(id, length) => {
+                    writeln!(sequence_table, "{}\t{length}", id.value())?
+                }
+                CompilerEvent::Element(id, position, term) => writeln!(
+                    element_table,
+                    "{}\t{position}\t{}",
+                    id.value(),
+                    term.value()
+                )?,
                 CompilerEvent::Argument(id, position, term) => writeln!(
                     argument_table,
                     "{}\t{position}\t{}",
@@ -89,6 +101,8 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
             &mut real_table,
             &mut compound_table,
             &mut argument_table,
+            &mut sequence_table,
+            &mut element_table,
         ] {
             Write::flush(sink)?;
         }

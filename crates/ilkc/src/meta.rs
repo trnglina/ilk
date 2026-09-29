@@ -60,6 +60,12 @@ pub fn load(paths: &[PathBuf]) -> Result<Definitions> {
                     stack.truncate(start);
                     stack.push(Term::Compound(compound));
                 }
+                ParseTerm::Sequence(length) => {
+                    let start = stack.len() - length;
+                    let sequence = terms.sequence(&stack[start..]);
+                    stack.truncate(start);
+                    stack.push(Term::Sequence(sequence));
+                }
                 ParseTerm::FactEnd => {
                     let root = stack.pop().expect("completed expression");
                     debug_assert!(stack.is_empty());
