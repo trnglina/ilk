@@ -29,10 +29,10 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
         let mut integer_table = create_writer(self.out_dir, "integer.facts")?;
         let mut real_table = create_writer(self.out_dir, "real.facts")?;
         let mut compound_table = create_writer(self.out_dir, "compound.facts")?;
-        let mut argument_table = create_writer(self.out_dir, "argument.facts")?;
+        let mut compound_argument_table = create_writer(self.out_dir, "compound_argument.facts")?;
 
         let mut sequence_table = create_writer(self.out_dir, "sequence.facts")?;
-        let mut element_table = create_writer(self.out_dir, "element.facts")?;
+        let mut sequence_element_table = create_writer(self.out_dir, "sequence_element.facts")?;
 
         while let Some(event) = self.compiler.next() {
             match event? {
@@ -73,14 +73,14 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
                 CompilerEvent::Sequence(id, length) => {
                     writeln!(sequence_table, "{}\t{length}", id.value())?
                 }
-                CompilerEvent::Element(id, position, term) => writeln!(
-                    element_table,
+                CompilerEvent::SequenceElement(id, position, term) => writeln!(
+                    sequence_element_table,
                     "{}\t{position}\t{}",
                     id.value(),
                     term.value()
                 )?,
-                CompilerEvent::Argument(id, position, term) => writeln!(
-                    argument_table,
+                CompilerEvent::CompoundArgument(id, position, term) => writeln!(
+                    compound_argument_table,
                     "{}\t{position}\t{}",
                     id.value(),
                     term.value()
@@ -100,9 +100,9 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
             &mut integer_table,
             &mut real_table,
             &mut compound_table,
-            &mut argument_table,
+            &mut compound_argument_table,
             &mut sequence_table,
-            &mut element_table,
+            &mut sequence_element_table,
         ] {
             Write::flush(sink)?;
         }

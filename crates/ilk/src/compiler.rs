@@ -70,9 +70,9 @@ pub enum CompilerEvent<'s, AtomT> {
     Integer(TermId, i32),
     Real(TermId, f32),
     Compound(TermId, TermId),
-    Argument(TermId, u32, TermId),
+    CompoundArgument(TermId, u32, TermId),
     Sequence(TermId, u32),
-    Element(TermId, u32, TermId),
+    SequenceElement(TermId, u32, TermId),
 }
 
 struct Annotation {
@@ -372,7 +372,7 @@ impl<'s> Compiler<'s> {
                 if let Some(term) = args.get(*position) {
                     let index = u32::try_from(*position).expect("arg index fits in u32");
                     *position += 1;
-                    return Ok(Some(CompilerEvent::Argument(
+                    return Ok(Some(CompilerEvent::CompoundArgument(
                         *id,
                         index,
                         self.term_ids[term],
@@ -388,7 +388,7 @@ impl<'s> Compiler<'s> {
                 if let Some(term) = elements.get(*position) {
                     let index = u32::try_from(*position).expect("element index fits in u32");
                     *position += 1;
-                    return Ok(Some(CompilerEvent::Element(
+                    return Ok(Some(CompilerEvent::SequenceElement(
                         *id,
                         index,
                         self.term_ids[term],
