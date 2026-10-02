@@ -21,9 +21,12 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
         let mut text = create_writer(self.out_dir, "text.txt")?;
         let mut region_start_table = create_writer(self.out_dir, "region_start.facts")?;
         let mut region_end_table = create_writer(self.out_dir, "region_end.facts")?;
+        let mut source_region_start_table =
+            create_writer(self.out_dir, "source_region_start.facts")?;
+        let mut source_region_end_table = create_writer(self.out_dir, "source_region_end.facts")?;
         let mut assertion_table = create_writer(self.out_dir, "assertion.facts")?;
-        let mut parent_table = create_writer(self.out_dir, "parent.facts")?;
-        let mut ancestor_table = create_writer(self.out_dir, "ancestor.facts")?;
+        let mut parent_table = create_writer(self.out_dir, "source_parent.facts")?;
+        let mut ancestor_table = create_writer(self.out_dir, "source_ancestor.facts")?;
         let mut atom_table = create_writer(self.out_dir, "atom.facts")?; // .input atom(rfc4180=true)
         let mut integer_table = create_writer(self.out_dir, "integer.facts")?;
         let mut real_table = create_writer(self.out_dir, "real.facts")?;
@@ -36,19 +39,21 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
         while let Some(event) = self.compiler.next() {
             match event? {
                 CompilerEvent::Text(chunk) => text.write_all(chunk.as_bytes())?,
-                CompilerEvent::RegionStart(id, offset) => {
-                    writeln!(region_start_table, "{}\t{offset}", id.value())?
+                CompilerEvent::RegionStart(id, text_offset, source_offset) => {
+                    writeln!(region_start_table, "{}\t{text_offset}", id.value())?;
+                    writeln!(source_region_start_table, "{}\t{source_offset}", id.value())?;
                 }
-                CompilerEvent::RegionEnd(id, offset) => {
-                    writeln!(region_end_table, "{}\t{offset}", id.value())?
+                CompilerEvent::RegionEnd(id, text_offset, source_offset) => {
+                    writeln!(region_end_table, "{}\t{text_offset}", id.value())?;
+                    writeln!(source_region_end_table, "{}\t{source_offset}", id.value())?;
                 }
                 CompilerEvent::Assertion(term, region) => {
                     writeln!(assertion_table, "{}\t{}", term.value(), region.value())?
                 }
-                CompilerEvent::Parent(outer, inner) => {
+                CompilerEvent::SourceParent(outer, inner) => {
                     writeln!(parent_table, "{}\t{}", outer.value(), inner.value())?
                 }
-                CompilerEvent::Ancestor(outer, inner) => {
+                CompilerEvent::SourceAncestor(outer, inner) => {
                     writeln!(ancestor_table, "{}\t{}", outer.value(), inner.value())?
                 }
                 CompilerEvent::Atom(id, value) => {
@@ -85,6 +90,8 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
             &mut text,
             &mut region_start_table,
             &mut region_end_table,
+            &mut source_region_start_table,
+            &mut source_region_end_table,
             &mut assertion_table,
             &mut parent_table,
             &mut ancestor_table,

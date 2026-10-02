@@ -58,7 +58,7 @@ assertion(has(franklin, match), $b).
 region_end($b, 82).
 ```
 
-Because the regions above overlap without either completely containing the other, there is no parent or ancestor relationship between them. A region completely contained by other regions, however, is a child of each of them, even when those containing regions overlap one another:
+Because the source regions above overlap without either completely containing the other, there is no parent or ancestor relationship between them. A source region completely contained by other source regions, however, is a child of each of them, even when those containing regions overlap one another:
 
 ```ilk
 @a<area(a)|Alpha @<area(b)|Beta @<item|child@> gamma@a> delta@>
@@ -77,10 +77,17 @@ region_start($c, 11).
 assertion(item, $c).
 region_end($c, 16).
 
-parent($a, $c).
-parent($b, $c).
-ancestor($a, $c).
-ancestor($b, $c).
+source_region_start($sa, 0).
+source_region_end($sa, 55).
+source_region_start($sb, 17).
+source_region_end($sb, 63).
+source_region_start($sc, 32).
+source_region_end($sc, 46).
+
+source_parent($sa, $sc).
+source_parent($sb, $sc).
+source_ancestor($sa, $sc).
+source_ancestor($sb, $sc).
 ```
 
 Note that naming a region moves it out of the normal open/close stack entirely, so in each overlapping example above, only one of the overlapping regions needed to be labeled. Labels may be omitted completely if there is no overlap:

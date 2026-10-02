@@ -27,8 +27,8 @@ pub enum ProseError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProseChunk<'a> {
     Text(&'a str),
-    RegionStart { id: usize },
-    RegionEnd { id: usize },
+    RegionStart { id: usize, source_offset: usize },
+    RegionEnd { id: usize, source_offset: usize },
     TermEvent(ParseTerm<'a>),
 }
 
@@ -312,9 +312,15 @@ impl<'a> ProseParser<'a> {
                     &self.source[marker_start + 1..marker_start + 2],
                 ))
             }
-            Marker::PointStart { body_start, .. } => {
+            Marker::PointStart {
+                marker_start,
+                body_start,
+            } => {
                 let id = self.begin_parsing_point(body_start)?;
-                Ok(Some(ProseChunk::RegionStart { id }))
+                Ok(Some(ProseChunk::RegionStart {
+                    id,
+                    source_offset: marker_start,
+                }))
             }
             Marker::RegionOpenStart {
                 label,
@@ -322,7 +328,10 @@ impl<'a> ProseParser<'a> {
                 body_start,
             } => {
                 let id = self.begin_parsing_region(label, marker_start, body_start)?;
-                Ok(Some(ProseChunk::RegionStart { id }))
+                Ok(Some(ProseChunk::RegionStart {
+                    id,
+                    source_offset: marker_start,
+                }))
             }
             Marker::RegionClose {
                 label,
@@ -340,7 +349,10 @@ impl<'a> ProseParser<'a> {
                 };
 
                 self.offset = marker_end;
-                Ok(Some(ProseChunk::RegionEnd { id: region.id }))
+                Ok(Some(ProseChunk::RegionEnd {
+                    id: region.id,
+                    source_offset: self.offset,
+                }))
             }
             Marker::BlockOpenStart {
                 marker_start,
@@ -352,7 +364,10 @@ impl<'a> ProseParser<'a> {
                     b'|',
                     MarkerContinuation::BlockOpenEnd { id, marker_start },
                 );
-                Ok(Some(ProseChunk::RegionStart { id }))
+                Ok(Some(ProseChunk::RegionStart {
+                    id,
+                    source_offset: marker_start,
+                }))
             }
             Marker::BlockClose { marker_start } => {
                 let region = self.block_stack.pop().map(|block| block.region);
@@ -364,7 +379,10 @@ impl<'a> ProseParser<'a> {
 
                 self.offset = marker_start + 2;
                 self.state = ProseParserState::FinishingBlockEnd;
-                Ok(Some(ProseChunk::RegionEnd { id: region.id }))
+                Ok(Some(ProseChunk::RegionEnd {
+                    id: region.id,
+                    source_offset: self.offset,
+                }))
             }
             Marker::Invalid { marker_start } => {
                 self.offset = marker_start;
@@ -450,7 +468,10 @@ impl<'a> ProseParser<'a> {
         cont: MarkerContinuation<'a>,
     ) -> Result<Option<ProseChunk<'a>>, ProseError> {
         match cont {
-            MarkerContinuation::PointEnd { id } => Ok(Some(ProseChunk::RegionEnd { id })),
+            MarkerContinuation::PointEnd { id } => Ok(Some(ProseChunk::RegionEnd {
+                id,
+                source_offset: self.offset,
+            })),
             MarkerContinuation::RegionOpenEnd {
                 id,
                 label,

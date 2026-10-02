@@ -32,6 +32,19 @@ impl RegionId {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourceRegionId(u32);
+
+impl SourceRegionId {
+    pub fn new(id: usize) -> Self {
+        Self(u32::try_from(id).expect("id fits in u32"))
+    }
+
+    pub fn value(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TermId(u32);
 
 impl TermId {
@@ -47,11 +60,12 @@ impl TermId {
 #[derive(Clone, Copy, Debug, PartialEq, Functor)]
 pub enum CompilerEvent<'s, AtomT> {
     Text(&'s str),
-    RegionStart(RegionId, u32),
-    RegionEnd(RegionId, u32),
+    RegionStart(RegionId, u32, u32),
+    RegionEnd(RegionId, u32, u32),
     Assertion(TermId, RegionId),
-    Parent(RegionId, RegionId),
-    Ancestor(RegionId, RegionId),
+
+    SourceParent(SourceRegionId, SourceRegionId),
+    SourceAncestor(SourceRegionId, SourceRegionId),
     Atom(TermId, AtomT),
     Integer(TermId, i32),
     Real(TermId, f32),
@@ -74,9 +88,9 @@ enum Pending {
         position: usize,
     },
     Close {
-        id: RegionId,
-        children: vec::IntoIter<RegionId>,
-        last_outer: Option<RegionId>,
+        id: SourceRegionId,
+        children: vec::IntoIter<SourceRegionId>,
+        last_outer: Option<SourceRegionId>,
     },
 }
 
@@ -85,8 +99,8 @@ pub struct Compiler<'s> {
     term_table: TermTable,
     term_ids: HashMap<Term, TermId>,
     term_stack: Vec<Term>,
-    region_map: BTreeMap<RegionId, Vec<RegionId>>,
-    current_region: Option<RegionId>,
+    source_region_map: BTreeMap<SourceRegionId, Vec<SourceRegionId>>,
+    current_source_region: Option<SourceRegionId>,
     text_offset: u32,
     pending: Option<Pending>,
     done: bool,
@@ -99,8 +113,8 @@ impl<'s> Compiler<'s> {
             term_table: TermTable::new(),
             term_ids: HashMap::new(),
             term_stack: Vec::new(),
-            region_map: BTreeMap::new(),
-            current_region: None,
+            source_region_map: BTreeMap::new(),
+            current_source_region: None,
             text_offset: 0,
             pending: None,
             done: false,
@@ -132,7 +146,7 @@ impl<'s> Compiler<'s> {
         }
 
         let Some(chunk) = self.parser.next() else {
-            debug_assert!(self.region_map.is_empty());
+            debug_assert!(self.source_region_map.is_empty());
             debug_assert!(self.term_stack.is_empty());
 
             self.done = true;
@@ -159,21 +173,32 @@ impl<'s> Compiler<'s> {
                     self.text_offset + u32::try_from(text.len()).expect("text offset fits in u32");
                 Some(CompilerEvent::Text(text))
             }
-            ProseChunk::RegionStart { id } => {
-                let id = RegionId::new(id);
-                self.region_map.insert(id, Vec::default());
-                self.current_region = Some(id);
-                Some(CompilerEvent::RegionStart(id, self.text_offset))
+            ProseChunk::RegionStart { id, source_offset } => {
+                let source_id = SourceRegionId::new(id);
+                self.source_region_map.insert(source_id, Vec::default());
+                self.current_source_region = Some(source_id);
+                Some(CompilerEvent::RegionStart(
+                    RegionId::new(id),
+                    self.text_offset,
+                    u32::try_from(source_offset).expect("source offset fits in u32"),
+                ))
             }
-            ProseChunk::RegionEnd { id } => {
-                let id = RegionId::new(id);
-                let children = self.region_map.remove(&id).expect("well-formed region");
+            ProseChunk::RegionEnd { id, source_offset } => {
+                let source_id = SourceRegionId::new(id);
+                let children = self
+                    .source_region_map
+                    .remove(&source_id)
+                    .expect("well-formed source region");
                 self.pending = Some(Pending::Close {
-                    id,
+                    id: source_id,
                     children: children.into_iter(),
                     last_outer: None,
                 });
-                Some(CompilerEvent::RegionEnd(id, self.text_offset))
+                Some(CompilerEvent::RegionEnd(
+                    RegionId::new(id),
+                    self.text_offset,
+                    u32::try_from(source_offset).expect("source offset fits in u32"),
+                ))
             }
             ProseChunk::TermEvent(event) => match event {
                 ParseTerm::Atom(atom) => {
@@ -213,8 +238,13 @@ impl<'s> Compiler<'s> {
                 ParseTerm::FactEnd => {
                     let term = self.term_stack.pop().expect("fact has a root");
                     debug_assert!(self.term_stack.is_empty());
-                    let region = self.current_region.expect("fact has a region");
-                    Some(CompilerEvent::Assertion(self.term_ids[&term], region))
+                    let region = self
+                        .current_source_region
+                        .expect("fact has a source region");
+                    Some(CompilerEvent::Assertion(
+                        self.term_ids[&term],
+                        RegionId::new(region.value() as usize),
+                    ))
                 }
             },
         })
@@ -308,11 +338,11 @@ impl<'s> Compiler<'s> {
                 last_outer,
             } => {
                 if let Some(child) = children.next() {
-                    return Ok(Some(CompilerEvent::Parent(*id, child)));
+                    return Ok(Some(CompilerEvent::SourceParent(*id, child)));
                 }
                 let lower = last_outer.map_or(Bound::Unbounded, Bound::Excluded);
                 if let Some((&outer, children)) = self
-                    .region_map
+                    .source_region_map
                     .range_mut((lower, Bound::Excluded(*id)))
                     .next()
                 {
@@ -321,7 +351,7 @@ impl<'s> Compiler<'s> {
                     }
                     children.push(*id);
                     *last_outer = Some(outer);
-                    return Ok(Some(CompilerEvent::Ancestor(outer, *id)));
+                    return Ok(Some(CompilerEvent::SourceAncestor(outer, *id)));
                 }
             }
         }
