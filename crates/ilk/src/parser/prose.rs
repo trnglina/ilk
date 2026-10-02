@@ -263,8 +263,8 @@ impl<'a> ProseParser<'a> {
             None
         };
 
-        if let Some(text) = text {
-            return Ok(ProseChunk::from_nonempty_text(text));
+        if let Some(chunk) = text.and_then(ProseChunk::from_nonempty_text) {
+            return Ok(Some(chunk));
         }
 
         match boundary {
