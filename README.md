@@ -22,7 +22,7 @@ Assertions are inherently tied to their position in text:
 
 ```pl
 region_start($a, 0). % the dollar sign ($) indicates a generated identifier
-assertion(start, $a).
+assertion(start, $a, $sa).
 region_end($a, 0).
 ```
 
@@ -36,8 +36,8 @@ Unquoted atom names have two forms: word names and symbol names. Word names (als
 
 ```pl
 region_start($a, 0).
-assertion(has(alice, item(lantern, 1)), $a).
-assertion(name(alice, 'Alice'), $a).
+assertion(has(alice, item(lantern, 1)), $a, $sa).
+assertion(name(alice, 'Alice'), $a, $sa).
 region_end($a, 0).
 ```
 
@@ -49,12 +49,12 @@ Facts may also be asserted over _regions_ of text. Facts asserted over regions m
 
 ```pl
 region_start($a, 0).
-assertion(has(alice, lantern), $a).
+assertion(has(alice, lantern), $a, $sa).
 region_end($a, 37).
 
 region_start($b, 10).
-assertion(has(franklin, lantern), $b).
-assertion(has(franklin, match), $b).
+assertion(has(franklin, lantern), $b, $sb).
+assertion(has(franklin, match), $b, $sb).
 region_end($b, 82).
 ```
 
@@ -66,15 +66,15 @@ Because the source regions above overlap without either completely containing th
 
 ```pl
 region_start($a, 0).
-assertion(area(a), $a).
+assertion(area(a), $a, $sa).
 region_end($a, 22).
 
 region_start($b, 6).
-assertion(area(b), $b).
+assertion(area(b), $b, $sb).
 region_end($b, 28).
 
 region_start($c, 11).
-assertion(item, $c).
+assertion(item, $c, $sc).
 region_end($c, 16).
 
 source_region_start($sa, 0).
@@ -98,7 +98,7 @@ Note that naming a region moves it out of the normal open/close stack entirely, 
 
 ```pl
 region_start($a, 0).
-assertion(has(alice, lantern), $a).
+assertion(has(alice, lantern), $a, $sa).
 region_end($a, 28).
 ```
 

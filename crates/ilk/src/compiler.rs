@@ -1,11 +1,12 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    ops::Bound,
     vec,
 };
 
 use functor_derive::Functor;
 use thiserror::Error;
+
+use crate::intern::InternTable;
 
 use crate::{
     AtomHandle, CompoundHandle, IntoTerm, ParseTerm, ProseChunk, ProseError, ProseParser,
@@ -60,9 +61,12 @@ impl TermId {
 #[derive(Clone, Copy, Debug, PartialEq, Functor)]
 pub enum CompilerEvent<'s, AtomT> {
     Text(&'s str),
-    RegionStart(RegionId, u32, u32),
-    RegionEnd(RegionId, u32, u32),
-    Assertion(TermId, RegionId),
+    Regions {
+        text: Option<(RegionId, u32, u32)>,
+        source: Option<(SourceRegionId, u32, u32)>,
+    },
+    /// Term, extracted-text region, original-source region.
+    Assertion(TermId, RegionId, SourceRegionId),
 
     SourceParent(SourceRegionId, SourceRegionId),
     SourceAncestor(SourceRegionId, SourceRegionId),
@@ -88,10 +92,20 @@ enum Pending {
         position: usize,
     },
     Close {
-        id: SourceRegionId,
-        children: vec::IntoIter<SourceRegionId>,
-        last_outer: Option<SourceRegionId>,
+        text: RegionId,
+        source: SourceRegionId,
+        assertions: vec::IntoIter<TermId>,
+        children: vec::IntoIter<(usize, SourceRegionId)>,
+        descendants: vec::IntoIter<SourceRegionId>,
     },
+}
+
+struct OpenRegion {
+    text_start: u32,
+    source_start: u32,
+    assertions: Vec<TermId>,
+    children: Vec<(usize, SourceRegionId)>,
+    descendants: Vec<SourceRegionId>,
 }
 
 pub struct Compiler<'s> {
@@ -99,8 +113,10 @@ pub struct Compiler<'s> {
     term_table: TermTable,
     term_ids: HashMap<Term, TermId>,
     term_stack: Vec<Term>,
-    source_region_map: BTreeMap<SourceRegionId, Vec<SourceRegionId>>,
-    current_source_region: Option<SourceRegionId>,
+    source_region_map: BTreeMap<usize, OpenRegion>,
+    current_source_region: Option<usize>,
+    text_regions: InternTable<u32>,
+    source_regions: InternTable<u32>,
     text_offset: u32,
     pending: Option<Pending>,
     done: bool,
@@ -115,6 +131,8 @@ impl<'s> Compiler<'s> {
             term_stack: Vec::new(),
             source_region_map: BTreeMap::new(),
             current_source_region: None,
+            text_regions: InternTable::default(),
+            source_regions: InternTable::default(),
             text_offset: 0,
             pending: None,
             done: false,
@@ -174,31 +192,52 @@ impl<'s> Compiler<'s> {
                 Some(CompilerEvent::Text(text))
             }
             ProseChunk::RegionStart { id, source_offset } => {
-                let source_id = SourceRegionId::new(id);
-                self.source_region_map.insert(source_id, Vec::default());
-                self.current_source_region = Some(source_id);
-                Some(CompilerEvent::RegionStart(
-                    RegionId::new(id),
-                    self.text_offset,
-                    u32::try_from(source_offset).expect("source offset fits in u32"),
-                ))
+                self.source_region_map.insert(
+                    id,
+                    OpenRegion {
+                        text_start: self.text_offset,
+                        source_start: u32::try_from(source_offset)
+                            .expect("source offset fits in u32"),
+                        assertions: Vec::new(),
+                        children: Vec::new(),
+                        descendants: Vec::new(),
+                    },
+                );
+                self.current_source_region = Some(id);
+                None
             }
             ProseChunk::RegionEnd { id, source_offset } => {
-                let source_id = SourceRegionId::new(id);
-                let children = self
+                let region = self
                     .source_region_map
-                    .remove(&source_id)
+                    .remove(&id)
                     .expect("well-formed source region");
+                let source_end = u32::try_from(source_offset).expect("source offset fits in u32");
+                let (text_id, new_text) = self
+                    .text_regions
+                    .intern_with_status(&[region.text_start, self.text_offset]);
+                let (source_id, new_source) = self
+                    .source_regions
+                    .intern_with_status(&[region.source_start, source_end]);
+                let text_id = RegionId::new(text_id);
+                let source_id = SourceRegionId::new(source_id);
+                for (_, outer) in self.source_region_map.range_mut(..id) {
+                    while outer.children.last().is_some_and(|&(child, _)| child > id) {
+                        outer.children.pop();
+                    }
+                    outer.children.push((id, source_id));
+                    outer.descendants.push(source_id);
+                }
                 self.pending = Some(Pending::Close {
-                    id: source_id,
-                    children: children.into_iter(),
-                    last_outer: None,
+                    text: text_id,
+                    source: source_id,
+                    assertions: region.assertions.into_iter(),
+                    children: region.children.into_iter(),
+                    descendants: region.descendants.into_iter(),
                 });
-                Some(CompilerEvent::RegionEnd(
-                    RegionId::new(id),
-                    self.text_offset,
-                    u32::try_from(source_offset).expect("source offset fits in u32"),
-                ))
+                Some(CompilerEvent::Regions {
+                    text: new_text.then_some((text_id, region.text_start, self.text_offset)),
+                    source: new_source.then_some((source_id, region.source_start, source_end)),
+                })
             }
             ProseChunk::TermEvent(event) => match event {
                 ParseTerm::Atom(atom) => {
@@ -241,10 +280,12 @@ impl<'s> Compiler<'s> {
                     let region = self
                         .current_source_region
                         .expect("fact has a source region");
-                    Some(CompilerEvent::Assertion(
-                        self.term_ids[&term],
-                        RegionId::new(region.value() as usize),
-                    ))
+                    self.source_region_map
+                        .get_mut(&region)
+                        .expect("open source region")
+                        .assertions
+                        .push(self.term_ids[&term]);
+                    None
                 }
             },
         })
@@ -333,25 +374,20 @@ impl<'s> Compiler<'s> {
                 }
             }
             Pending::Close {
-                id,
+                text,
+                source,
+                assertions,
                 children,
-                last_outer,
+                descendants,
             } => {
-                if let Some(child) = children.next() {
-                    return Ok(Some(CompilerEvent::SourceParent(*id, child)));
+                if let Some(term) = assertions.next() {
+                    return Ok(Some(CompilerEvent::Assertion(term, *text, *source)));
                 }
-                let lower = last_outer.map_or(Bound::Unbounded, Bound::Excluded);
-                if let Some((&outer, children)) = self
-                    .source_region_map
-                    .range_mut((lower, Bound::Excluded(*id)))
-                    .next()
-                {
-                    while children.last().is_some_and(|child| child > id) {
-                        children.pop();
-                    }
-                    children.push(*id);
-                    *last_outer = Some(outer);
-                    return Ok(Some(CompilerEvent::SourceAncestor(outer, *id)));
+                if let Some((_, child)) = children.next() {
+                    return Ok(Some(CompilerEvent::SourceParent(*source, child)));
+                }
+                if let Some(descendant) = descendants.next() {
+                    return Ok(Some(CompilerEvent::SourceAncestor(*source, descendant)));
                 }
             }
         }

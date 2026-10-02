@@ -39,17 +39,23 @@ impl<'s, 'o> SouffleWriter<'s, 'o> {
         while let Some(event) = self.compiler.next() {
             match event? {
                 CompilerEvent::Text(chunk) => text.write_all(chunk.as_bytes())?,
-                CompilerEvent::RegionStart(id, text_offset, source_offset) => {
-                    writeln!(region_start_table, "{}\t{text_offset}", id.value())?;
-                    writeln!(source_region_start_table, "{}\t{source_offset}", id.value())?;
+                CompilerEvent::Regions { text, source } => {
+                    if let Some((id, start, end)) = text {
+                        writeln!(region_start_table, "{}\t{start}", id.value())?;
+                        writeln!(region_end_table, "{}\t{end}", id.value())?;
+                    }
+                    if let Some((id, start, end)) = source {
+                        writeln!(source_region_start_table, "{}\t{start}", id.value())?;
+                        writeln!(source_region_end_table, "{}\t{end}", id.value())?;
+                    }
                 }
-                CompilerEvent::RegionEnd(id, text_offset, source_offset) => {
-                    writeln!(region_end_table, "{}\t{text_offset}", id.value())?;
-                    writeln!(source_region_end_table, "{}\t{source_offset}", id.value())?;
-                }
-                CompilerEvent::Assertion(term, region) => {
-                    writeln!(assertion_table, "{}\t{}", term.value(), region.value())?
-                }
+                CompilerEvent::Assertion(term, region, source) => writeln!(
+                    assertion_table,
+                    "{}\t{}\t{}",
+                    term.value(),
+                    region.value(),
+                    source.value()
+                )?,
                 CompilerEvent::SourceParent(outer, inner) => {
                     writeln!(parent_table, "{}\t{}", outer.value(), inner.value())?
                 }
