@@ -18,12 +18,11 @@ We can augment this document by asserting facts at specific points in the text:
 @{start}Hello World!
 ```
 
-Each assertion has a unique identity, even when its term is identical to that of another assertion. Assertions may be tied to one or more ordered regions of text.
+Assertions are inherently tied to their position in text:
 
 ```pl
 region_start($a, 0). % the dollar sign ($) indicates a generated identifier
-assertion($s0, start).
-assertion_region($s0, 0, $a).
+assertion(start, $a).
 region_end($a, 0).
 ```
 
@@ -37,10 +36,8 @@ Unquoted atom names have two forms: word names and symbol names. Word names (als
 
 ```pl
 region_start($a, 0).
-assertion($s0, has(alice, item(lantern, 1))).
-assertion_region($s0, 0, $a).
-assertion($s1, name(alice, 'Alice')).
-assertion_region($s1, 0, $a).
+assertion(has(alice, item(lantern, 1)), $a).
+assertion(name(alice, 'Alice'), $a).
 region_end($a, 0).
 ```
 
@@ -52,15 +49,12 @@ Facts may also be asserted over _regions_ of text. Facts asserted over regions m
 
 ```pl
 region_start($a, 0).
-assertion($s0, has(alice, lantern)).
-assertion_region($s0, 0, $a).
+assertion(has(alice, lantern), $a).
 region_end($a, 37).
 
 region_start($b, 10).
-assertion($s1, has(franklin, lantern)).
-assertion_region($s1, 0, $b).
-assertion($s2, has(franklin, match)).
-assertion_region($s2, 0, $b).
+assertion(has(franklin, lantern), $b).
+assertion(has(franklin, match), $b).
 region_end($b, 82).
 ```
 
@@ -72,18 +66,15 @@ Because the regions above overlap without either completely containing the other
 
 ```pl
 region_start($a, 0).
-assertion($s0, area(a)).
-assertion_region($s0, 0, $a).
+assertion(area(a), $a).
 region_end($a, 22).
 
 region_start($b, 6).
-assertion($s1, area(b)).
-assertion_region($s1, 0, $b).
+assertion(area(b), $b).
 region_end($b, 28).
 
 region_start($c, 11).
-assertion($s2, item).
-assertion_region($s2, 0, $c).
+assertion(item, $c).
 region_end($c, 16).
 
 parent($a, $c).
@@ -100,8 +91,7 @@ Note that naming a region moves it out of the normal open/close stack entirely, 
 
 ```pl
 region_start($a, 0).
-assertion($s0, has(alice, lantern)).
-assertion_region($s0, 0, $a).
+assertion(has(alice, lantern), $a).
 region_end($a, 28).
 ```
 
