@@ -33,7 +33,7 @@ pub enum ProseChunk<'a> {
 }
 
 impl<'a> ProseChunk<'a> {
-    pub fn from_nonempty_text(text: &'a str) -> Option<Self> {
+    fn from_nonempty_text(text: &'a str) -> Option<Self> {
         if text.is_empty() {
             return None;
         }
@@ -105,6 +105,7 @@ impl Marker<'_> {
     }
 }
 
+#[allow(clippy::enum_variant_names)]
 enum MarkerContinuation<'a> {
     PointEnd {
         id: usize,

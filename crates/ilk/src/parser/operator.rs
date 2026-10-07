@@ -44,7 +44,7 @@ impl<'a> OperatorConfig<'a> {
     pub fn new(defs: &[OperatorDefinition<'a>]) -> Result<Self, OperatorError> {
         let mut map: HashMap<(&'a str, bool), OperatorDefinition<'a>> = HashMap::new();
 
-        for operator in defs.into_iter() {
+        for operator in defs {
             if !(1..=1200).contains(&operator.precedence) {
                 return Err(OperatorError::InvalidPrecedence);
             }
@@ -65,7 +65,7 @@ impl<'a> OperatorConfig<'a> {
         Ok(Self { map })
     }
 
-    pub fn get(&self, name: &'a str, prefix: bool) -> Option<&OperatorDefinition<'a>> {
+    pub(crate) fn get(&self, name: &'a str, prefix: bool) -> Option<&OperatorDefinition<'a>> {
         self.map.get(&(name, prefix))
     }
 }

@@ -3,7 +3,6 @@ use std::{
     vec,
 };
 
-use functor_derive::Functor;
 use thiserror::Error;
 
 use crate::intern::InternTable;
@@ -17,14 +16,16 @@ use crate::{
 pub enum CompilerError {
     #[error("{source} at {offset}")]
     Parse { offset: usize, source: ProseError },
+    #[error("compiler limit exceeded")]
+    LimitExceeded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(u32);
 
 impl RegionId {
-    pub fn new(id: usize) -> Self {
-        Self(u32::try_from(id).expect("id fits in u32"))
+    pub fn new(id: u32) -> Self {
+        Self(id)
     }
 
     pub fn value(self) -> u32 {
@@ -36,8 +37,8 @@ impl RegionId {
 pub struct SourceRegionId(u32);
 
 impl SourceRegionId {
-    pub fn new(id: usize) -> Self {
-        Self(u32::try_from(id).expect("id fits in u32"))
+    pub fn new(id: u32) -> Self {
+        Self(id)
     }
 
     pub fn value(self) -> u32 {
@@ -49,8 +50,8 @@ impl SourceRegionId {
 pub struct TermId(u32);
 
 impl TermId {
-    pub fn new(id: usize) -> Self {
-        Self(u32::try_from(id).expect("id fits in u32"))
+    pub fn new(id: u32) -> Self {
+        Self(id)
     }
 
     pub fn value(self) -> u32 {
@@ -58,7 +59,7 @@ impl TermId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Functor)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CompilerEvent<'s, AtomT> {
     Text(&'s str),
     Regions {
@@ -77,6 +78,38 @@ pub enum CompilerEvent<'s, AtomT> {
     CompoundArgument(TermId, u32, TermId),
     Sequence(TermId, u32),
     SequenceElement(TermId, u32, TermId),
+}
+
+impl<'s, A> CompilerEvent<'s, A> {
+    pub fn fmap<B>(self, f: impl Fn(A) -> B) -> CompilerEvent<'s, B> {
+        self.try_fmap(|atom| Ok::<_, std::convert::Infallible>(f(atom)))
+            .unwrap_or_else(|never| match never {})
+    }
+
+    pub fn try_fmap<B, E>(self, f: impl Fn(A) -> Result<B, E>) -> Result<CompilerEvent<'s, B>, E> {
+        Ok(match self {
+            Self::Text(text) => CompilerEvent::Text(text),
+            Self::Regions { text, source } => CompilerEvent::Regions { text, source },
+            Self::Assertion(term, text, source) => CompilerEvent::Assertion(term, text, source),
+            Self::SourceParent(parent, child) => CompilerEvent::SourceParent(parent, child),
+            Self::SourceAncestor(parent, child) => CompilerEvent::SourceAncestor(parent, child),
+            Self::Atom(id, atom) => CompilerEvent::Atom(id, f(atom)?),
+            Self::Integer(id, value) => CompilerEvent::Integer(id, value),
+            Self::Real(id, value) => CompilerEvent::Real(id, value),
+            Self::Compound(id, functor) => CompilerEvent::Compound(id, functor),
+            Self::CompoundArgument(id, position, term) => {
+                CompilerEvent::CompoundArgument(id, position, term)
+            }
+            Self::Sequence(id, length) => CompilerEvent::Sequence(id, length),
+            Self::SequenceElement(id, position, term) => {
+                CompilerEvent::SequenceElement(id, position, term)
+            }
+        })
+    }
+}
+
+fn to_u32(value: usize) -> Result<u32, CompilerError> {
+    u32::try_from(value).map_err(|_| CompilerError::LimitExceeded)
 }
 
 enum Pending {
@@ -139,6 +172,7 @@ impl<'s> Compiler<'s> {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<Result<CompilerEvent<'s, &str>, CompilerError>> {
         loop {
             if self.done {
@@ -187,8 +221,10 @@ impl<'s> Compiler<'s> {
     ) -> Result<Option<CompilerEvent<'s, AtomHandle>>, CompilerError> {
         Ok(match chunk {
             ProseChunk::Text(text) => {
-                self.text_offset =
-                    self.text_offset + u32::try_from(text.len()).expect("text offset fits in u32");
+                self.text_offset = self
+                    .text_offset
+                    .checked_add(to_u32(text.len())?)
+                    .ok_or(CompilerError::LimitExceeded)?;
                 Some(CompilerEvent::Text(text))
             }
             ProseChunk::RegionStart { id, source_offset } => {
@@ -196,8 +232,7 @@ impl<'s> Compiler<'s> {
                     id,
                     OpenRegion {
                         text_start: self.text_offset,
-                        source_start: u32::try_from(source_offset)
-                            .expect("source offset fits in u32"),
+                        source_start: to_u32(source_offset)?,
                         assertions: Vec::new(),
                         children: Vec::new(),
                         descendants: Vec::new(),
@@ -211,15 +246,15 @@ impl<'s> Compiler<'s> {
                     .source_region_map
                     .remove(&id)
                     .expect("well-formed source region");
-                let source_end = u32::try_from(source_offset).expect("source offset fits in u32");
+                let source_end = to_u32(source_offset)?;
                 let (text_id, new_text) = self
                     .text_regions
                     .intern_with_status(&[region.text_start, self.text_offset]);
                 let (source_id, new_source) = self
                     .source_regions
                     .intern_with_status(&[region.source_start, source_end]);
-                let text_id = RegionId::new(text_id);
-                let source_id = SourceRegionId::new(source_id);
+                let text_id = RegionId::new(to_u32(text_id)?);
+                let source_id = SourceRegionId::new(to_u32(source_id)?);
                 for (_, outer) in self.source_region_map.range_mut(..id) {
                     while outer.children.last().is_some_and(|&(child, _)| child > id) {
                         outer.children.pop();
@@ -299,7 +334,7 @@ impl<'s> Compiler<'s> {
             return Ok(None);
         }
 
-        let id = TermId::new(self.term_ids.len());
+        let id = TermId::new(to_u32(self.term_ids.len())?);
 
         self.term_ids.insert(term, id);
 
@@ -308,8 +343,7 @@ impl<'s> Compiler<'s> {
             Term::Integer(value) => CompilerEvent::Integer(id, value.value()),
             Term::Real(value) => CompilerEvent::Real(id, value.value()),
             Term::Sequence(sequence) => {
-                let length = u32::try_from(self.term_table.sequence_value(sequence).len())
-                    .expect("sequence length fits in u32");
+                let length = to_u32(self.term_table.sequence_value(sequence).len())?;
                 self.pending = Some(Pending::Elements {
                     id,
                     sequence,
@@ -348,7 +382,7 @@ impl<'s> Compiler<'s> {
             } => {
                 let (_, args) = self.term_table.compound_value(*compound);
                 if let Some(term) = args.get(*position) {
-                    let index = u32::try_from(*position).expect("arg index fits in u32");
+                    let index = to_u32(*position)?;
                     *position += 1;
                     return Ok(Some(CompilerEvent::CompoundArgument(
                         *id,
@@ -364,7 +398,7 @@ impl<'s> Compiler<'s> {
             } => {
                 let elements = self.term_table.sequence_value(*sequence);
                 if let Some(term) = elements.get(*position) {
-                    let index = u32::try_from(*position).expect("element index fits in u32");
+                    let index = to_u32(*position)?;
                     *position += 1;
                     return Ok(Some(CompilerEvent::SequenceElement(
                         *id,

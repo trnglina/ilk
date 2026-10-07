@@ -56,7 +56,7 @@ impl IntoTerm for ParseNumber {
 }
 
 impl<'a> ParseAtom<'a> {
-    fn value(self) -> Cow<'a, str> {
+    pub fn value(self) -> Cow<'a, str> {
         if !self.quoted || !self.body.contains(['\\', '\'']) {
             return Cow::Borrowed(self.body);
         }
@@ -175,7 +175,11 @@ pub struct TermParser<'a> {
 }
 
 impl<'a> TermParser<'a> {
-    pub fn new(source: &'a str, terminator: u8, operators: Option<&'a OperatorConfig<'a>>) -> Self {
+    pub(crate) fn new(
+        source: &'a str,
+        terminator: u8,
+        operators: Option<&'a OperatorConfig<'a>>,
+    ) -> Self {
         assert!(terminator.is_ascii(), "terminator must be ascii");
 
         Self {
