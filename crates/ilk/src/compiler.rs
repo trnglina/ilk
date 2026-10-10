@@ -8,8 +8,8 @@ use thiserror::Error;
 use crate::intern::InternTable;
 
 use crate::{
-    AtomHandle, CompoundHandle, IntoTerm, ParseTerm, ProseChunk, ProseError, ProseParser,
-    SequenceHandle, Term, TermTable,
+    AtomHandle, CompoundHandle, IntoTerm, ProseChunk, ProseError, ProseParser, SequenceHandle,
+    Term, TermEvent, TermTable,
 };
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -66,7 +66,6 @@ pub enum CompilerEvent<'s, AtomT> {
         text: Option<(RegionId, u32, u32)>,
         source: Option<(SourceRegionId, u32, u32)>,
     },
-    /// Term, extracted-text region, original-source region.
     Assertion(TermId, RegionId, SourceRegionId),
 
     SourceParent(SourceRegionId, SourceRegionId),
@@ -81,12 +80,12 @@ pub enum CompilerEvent<'s, AtomT> {
 }
 
 impl<'s, A> CompilerEvent<'s, A> {
-    pub fn fmap<B>(self, f: impl Fn(A) -> B) -> CompilerEvent<'s, B> {
-        self.try_fmap(|atom| Ok::<_, std::convert::Infallible>(f(atom)))
+    pub fn map<B>(self, f: impl Fn(A) -> B) -> CompilerEvent<'s, B> {
+        self.try_map(|atom| Ok::<_, std::convert::Infallible>(f(atom)))
             .unwrap_or_else(|never| match never {})
     }
 
-    pub fn try_fmap<B, E>(self, f: impl Fn(A) -> Result<B, E>) -> Result<CompilerEvent<'s, B>, E> {
+    pub fn try_map<B, E>(self, f: impl Fn(A) -> Result<B, E>) -> Result<CompilerEvent<'s, B>, E> {
         Ok(match self {
             Self::Text(text) => CompilerEvent::Text(text),
             Self::Regions { text, source } => CompilerEvent::Regions { text, source },
@@ -181,7 +180,7 @@ impl<'s> Compiler<'s> {
 
             match self.step() {
                 Ok(Some(event)) => {
-                    return Some(Ok(event.fmap(|atom| self.term_table.atom_value(atom))));
+                    return Some(Ok(event.map(|atom| self.term_table.atom_value(atom))));
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -227,12 +226,12 @@ impl<'s> Compiler<'s> {
                     .ok_or(CompilerError::LimitExceeded)?;
                 Some(CompilerEvent::Text(text))
             }
-            ProseChunk::RegionStart { id, source_offset } => {
+            ProseChunk::RegionStart { id, source_start } => {
                 self.source_region_map.insert(
                     id,
                     OpenRegion {
                         text_start: self.text_offset,
-                        source_start: to_u32(source_offset)?,
+                        source_start: to_u32(source_start)?,
                         assertions: Vec::new(),
                         children: Vec::new(),
                         descendants: Vec::new(),
@@ -241,12 +240,12 @@ impl<'s> Compiler<'s> {
                 self.current_source_region = Some(id);
                 None
             }
-            ProseChunk::RegionEnd { id, source_offset } => {
+            ProseChunk::RegionEnd { id, source_end } => {
                 let region = self
                     .source_region_map
                     .remove(&id)
                     .expect("well-formed source region");
-                let source_end = to_u32(source_offset)?;
+                let source_end = to_u32(source_end)?;
                 let (text_id, new_text) = self
                     .text_regions
                     .intern_with_status(&[region.text_start, self.text_offset]);
@@ -274,18 +273,18 @@ impl<'s> Compiler<'s> {
                     source: new_source.then_some((source_id, region.source_start, source_end)),
                 })
             }
-            ProseChunk::TermEvent(event) => match event {
-                ParseTerm::Atom(atom) => {
+            ProseChunk::Term(event) => match event {
+                TermEvent::Atom(atom) => {
                     let term = atom.into_term(&mut self.term_table);
                     self.term_stack.push(term);
                     self.generate_term_event(term)?
                 }
-                ParseTerm::Number(number) => {
+                TermEvent::Number(number) => {
                     let term = number.into_term(&mut self.term_table);
                     self.term_stack.push(term);
                     self.generate_term_event(term)?
                 }
-                ParseTerm::Compound(atom, arity) => {
+                TermEvent::Compound(atom, arity) => {
                     let Term::Atom(functor) = atom.into_term(&mut self.term_table) else {
                         unreachable!()
                     };
@@ -302,14 +301,14 @@ impl<'s> Compiler<'s> {
                         self.generate_term_event(term)?
                     }
                 }
-                ParseTerm::Sequence(length) => {
+                TermEvent::Sequence(length) => {
                     let start = self.term_stack.len() - length;
                     let term = Term::Sequence(self.term_table.sequence(&self.term_stack[start..]));
                     self.term_stack.truncate(start);
                     self.term_stack.push(term);
                     self.generate_term_event(term)?
                 }
-                ParseTerm::FactEnd => {
+                TermEvent::FactEnd => {
                     let term = self.term_stack.pop().expect("fact has a root");
                     debug_assert!(self.term_stack.is_empty());
                     let region = self

@@ -5,4 +5,4 @@ mod term;
 
 pub use operator::{OperatorClass, OperatorConfig, OperatorDefinition, OperatorError};
 pub use prose::{ProseChunk, ProseError, ProseParser};
-pub use term::{ParseAtom, ParseNumber, ParseTerm, TermError, TermParser};
+pub use term::{ParseAtom, ParseNumber, TermError, TermEvent, TermParser};

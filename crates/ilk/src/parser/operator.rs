@@ -41,10 +41,10 @@ pub struct OperatorConfig<'a> {
 }
 
 impl<'a> OperatorConfig<'a> {
-    pub fn new(defs: &[OperatorDefinition<'a>]) -> Result<Self, OperatorError> {
+    pub fn new(definitions: &[OperatorDefinition<'a>]) -> Result<Self, OperatorError> {
         let mut map: HashMap<(&'a str, bool), OperatorDefinition<'a>> = HashMap::new();
 
-        for operator in defs {
+        for operator in definitions {
             if !(1..=1200).contains(&operator.precedence) {
                 return Err(OperatorError::InvalidPrecedence);
             }

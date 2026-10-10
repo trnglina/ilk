@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use ilk::{
-    IntoTerm, OperatorClass, OperatorConfig, OperatorDefinition, ParseTerm, Term, TermParser,
+    IntoTerm, OperatorClass, OperatorConfig, OperatorDefinition, Term, TermEvent, TermParser,
     TermTable,
 };
 
@@ -41,17 +41,17 @@ pub fn load(paths: &[PathBuf]) -> Result<Definitions> {
     let mut definitions = Definitions::default();
     for path in paths {
         let source = fs::read_to_string(path)?;
-        let mut parser = TermParser::standalone(&source, None);
+        let mut parser = TermParser::new(&source, None);
         let mut terms = TermTable::new();
         let mut stack = Vec::new();
         let mut expression_start = None;
         while let Some(event) = parser.next() {
             let event = event?;
-            expression_start = expression_start.or(parser.current_fact_start_offset());
+            expression_start = expression_start.or(parser.fact_start());
             match event {
-                ParseTerm::Atom(atom) => stack.push(atom.into_term(&mut terms)),
-                ParseTerm::Number(number) => stack.push(number.into_term(&mut terms)),
-                ParseTerm::Compound(atom, arity) => {
+                TermEvent::Atom(atom) => stack.push(atom.into_term(&mut terms)),
+                TermEvent::Number(number) => stack.push(number.into_term(&mut terms)),
+                TermEvent::Compound(atom, arity) => {
                     let Term::Atom(functor) = atom.into_term(&mut terms) else {
                         unreachable!()
                     };
@@ -60,13 +60,13 @@ pub fn load(paths: &[PathBuf]) -> Result<Definitions> {
                     stack.truncate(start);
                     stack.push(Term::Compound(compound));
                 }
-                ParseTerm::Sequence(length) => {
+                TermEvent::Sequence(length) => {
                     let start = stack.len() - length;
                     let sequence = terms.sequence(&stack[start..]);
                     stack.truncate(start);
                     stack.push(Term::Sequence(sequence));
                 }
-                ParseTerm::FactEnd => {
+                TermEvent::FactEnd => {
                     let root = stack.pop().expect("completed expression");
                     debug_assert!(stack.is_empty());
                     let definition = read_operator_definition(root, &terms)?;

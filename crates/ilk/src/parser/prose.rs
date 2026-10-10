@@ -5,13 +5,13 @@ use thiserror::Error;
 use crate::parser::{
     ident::{is_word_ident_start, scan_word_ident},
     operator::OperatorConfig,
-    term::{ParseTerm, TermError, TermParser},
+    term::{TermError, TermEvent, TermParser},
 };
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum ProseError {
     #[error("label already used")]
-    ConflictingRegionLabel,
+    DuplicateRegionLabel,
     #[error("invalid indentation")]
     InvalidIndentation,
     #[error("unexpected character")]
@@ -27,9 +27,9 @@ pub enum ProseError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProseChunk<'a> {
     Text(&'a str),
-    RegionStart { id: usize, source_offset: usize },
-    RegionEnd { id: usize, source_offset: usize },
-    TermEvent(ParseTerm<'a>),
+    RegionStart { id: usize, source_start: usize },
+    RegionEnd { id: usize, source_end: usize },
+    Term(TermEvent<'a>),
 }
 
 impl<'a> ProseChunk<'a> {
@@ -57,7 +57,7 @@ enum Marker<'a> {
     EscapedAt {
         marker_start: usize,
     },
-    PointStart {
+    PointOpenStart {
         marker_start: usize,
         body_start: usize,
     },
@@ -84,10 +84,10 @@ enum Marker<'a> {
 }
 
 impl Marker<'_> {
-    pub fn marker_start(&self) -> usize {
+    fn marker_start(&self) -> usize {
         *match self {
             Marker::EscapedAt { marker_start }
-            | Marker::PointStart { marker_start, .. }
+            | Marker::PointOpenStart { marker_start, .. }
             | Marker::RegionOpenStart { marker_start, .. }
             | Marker::RegionClose { marker_start, .. }
             | Marker::BlockOpenStart { marker_start, .. }
@@ -96,7 +96,7 @@ impl Marker<'_> {
         }
     }
 
-    pub fn block_depth(self, open_blocks: usize) -> Option<usize> {
+    fn block_depth(self, open_blocks: usize) -> Option<usize> {
         match self {
             Marker::BlockOpenStart { .. } => Some(open_blocks),
             Marker::BlockClose { .. } if open_blocks > 0 => Some(open_blocks - 1),
@@ -107,7 +107,7 @@ impl Marker<'_> {
 
 #[allow(clippy::enum_variant_names)]
 enum MarkerContinuation<'a> {
-    PointEnd {
+    PointOpenEnd {
         id: usize,
     },
     RegionOpenEnd {
@@ -133,7 +133,7 @@ enum TextBoundary<'a> {
 }
 
 #[derive(Clone, Copy)]
-enum BlockLineEnd {
+enum BlockLineTerminator {
     EndOfFile,
     InlineMarker,
     BlockMarker,
@@ -141,15 +141,15 @@ enum BlockLineEnd {
 
 enum ProseParserState<'a> {
     Idle,
-    EmittingText {
+    Text {
         boundary: TextBoundary<'a>,
     },
-    EmittingFacts {
+    Facts {
         parser: TermParser<'a>,
         base: usize,
-        cont: MarkerContinuation<'a>,
+        after: MarkerContinuation<'a>,
     },
-    FinishingBlockEnd,
+    BlockMarkerLineEnd,
     Done,
     Failed,
 }
@@ -158,7 +158,7 @@ pub struct ProseParser<'a> {
     source: &'a str,
     operators: Option<&'a OperatorConfig<'a>>,
     offset: usize,
-    next_region_id: usize,
+    region_id_counter: usize,
     labeled_region_map: HashMap<&'a str, Region>,
     anonymous_region_stack: Vec<Region>,
     block_stack: Vec<Block<'a>>,
@@ -171,7 +171,7 @@ impl<'a> ProseParser<'a> {
             source,
             operators,
             offset: 0,
-            next_region_id: 0,
+            region_id_counter: 0,
             labeled_region_map: HashMap::new(),
             anonymous_region_stack: Vec::new(),
             block_stack: Vec::new(),
@@ -183,7 +183,7 @@ impl<'a> ProseParser<'a> {
         self.offset
     }
 
-    fn find_boundary(&self) -> Result<TextBoundary<'a>, usize> {
+    fn peek_boundary(&self) -> Result<TextBoundary<'a>, usize> {
         if let Some(marker_start) = self.source[self.offset..]
             .find('@')
             .map(|offset| self.offset + offset)
@@ -215,19 +215,19 @@ impl<'a> ProseParser<'a> {
 
     fn step(&mut self) -> Result<Option<ProseChunk<'a>>, ProseError> {
         match self.state {
-            ProseParserState::Idle => match self.find_boundary() {
+            ProseParserState::Idle => match self.peek_boundary() {
                 Ok(boundary) => {
-                    self.state = ProseParserState::EmittingText { boundary };
+                    self.state = ProseParserState::Text { boundary };
                     Ok(None)
                 }
-                Err(err_offset) => {
-                    self.offset = err_offset;
+                Err(error) => {
+                    self.offset = error;
                     Err(ProseError::UnexpectedCharacter)
                 }
             },
-            ProseParserState::EmittingText { boundary } => self.step_text(boundary),
-            ProseParserState::EmittingFacts { .. } => self.step_facts(),
-            ProseParserState::FinishingBlockEnd => {
+            ProseParserState::Text { boundary } => self.step_text(boundary),
+            ProseParserState::Facts { .. } => self.step_facts(),
+            ProseParserState::BlockMarkerLineEnd => {
                 self.skip_block_marker_line_end()?;
                 self.state = ProseParserState::Idle;
                 Ok(None)
@@ -236,9 +236,9 @@ impl<'a> ProseParser<'a> {
         }
     }
 
-    fn new_region_id(&mut self) -> usize {
-        let id = self.next_region_id;
-        self.next_region_id += 1;
+    fn allocate_region_id(&mut self) -> usize {
+        let id = self.region_id_counter;
+        self.region_id_counter += 1;
         id
     }
 
@@ -257,9 +257,9 @@ impl<'a> ProseParser<'a> {
             }
         } else if self.offset < end
             || (matches!(boundary, TextBoundary::Inline(_))
-                && is_start_of_line(self.source, self.offset))
+                && is_line_start_at(self.source, self.offset))
         {
-            self.parse_block_line(end, boundary.block_line_end())?
+            self.parse_block_line(end, boundary.block_line_terminator())?
         } else {
             None
         };
@@ -290,22 +290,22 @@ impl<'a> ProseParser<'a> {
             TextBoundary::Inline(marker) => {
                 self.offset = marker.marker_start();
                 self.state = ProseParserState::Idle;
-                self.step_marker(marker)
+                self.parse_marker(marker)
             }
             TextBoundary::Block {
                 prefix_start,
                 block_depth,
                 marker,
             } => {
-                self.parse_block_indent(prefix_start..marker.marker_start(), block_depth)?;
+                self.strip_block_indent(prefix_start..marker.marker_start(), block_depth)?;
                 self.offset = marker.marker_start();
                 self.state = ProseParserState::Idle;
-                self.step_marker(marker)
+                self.parse_marker(marker)
             }
         }
     }
 
-    fn step_marker(&mut self, marker: Marker<'a>) -> Result<Option<ProseChunk<'a>>, ProseError> {
+    fn parse_marker(&mut self, marker: Marker<'a>) -> Result<Option<ProseChunk<'a>>, ProseError> {
         match marker {
             Marker::EscapedAt { marker_start } => {
                 self.offset = marker_start + 2;
@@ -313,25 +313,22 @@ impl<'a> ProseParser<'a> {
                     &self.source[marker_start + 1..marker_start + 2],
                 ))
             }
-            Marker::PointStart {
-                marker_start,
+            Marker::PointOpenStart {
+                marker_start: source_start,
                 body_start,
             } => {
-                let id = self.begin_parsing_point(body_start)?;
-                Ok(Some(ProseChunk::RegionStart {
-                    id,
-                    source_offset: marker_start,
-                }))
+                let id = self.open_point(body_start);
+                Ok(Some(ProseChunk::RegionStart { id, source_start }))
             }
             Marker::RegionOpenStart {
                 label,
                 marker_start,
                 body_start,
             } => {
-                let id = self.begin_parsing_region(label, marker_start, body_start)?;
+                let id = self.open_region(label, marker_start, body_start)?;
                 Ok(Some(ProseChunk::RegionStart {
                     id,
-                    source_offset: marker_start,
+                    source_start: marker_start,
                 }))
             }
             Marker::RegionClose {
@@ -352,22 +349,17 @@ impl<'a> ProseParser<'a> {
                 self.offset = marker_end;
                 Ok(Some(ProseChunk::RegionEnd {
                     id: region.id,
-                    source_offset: self.offset,
+                    source_end: self.offset,
                 }))
             }
             Marker::BlockOpenStart {
                 marker_start,
                 body_start,
             } => {
-                let id = self.new_region_id();
-                self.begin_parsing_facts(
-                    body_start,
-                    b'|',
-                    MarkerContinuation::BlockOpenEnd { id, marker_start },
-                );
+                let id = self.open_block(marker_start, body_start);
                 Ok(Some(ProseChunk::RegionStart {
                     id,
-                    source_offset: marker_start,
+                    source_start: marker_start,
                 }))
             }
             Marker::BlockClose { marker_start } => {
@@ -379,10 +371,10 @@ impl<'a> ProseParser<'a> {
                 };
 
                 self.offset = marker_start + 2;
-                self.state = ProseParserState::FinishingBlockEnd;
+                self.state = ProseParserState::BlockMarkerLineEnd;
                 Ok(Some(ProseChunk::RegionEnd {
                     id: region.id,
-                    source_offset: self.offset,
+                    source_end: self.offset,
                 }))
             }
             Marker::Invalid { marker_start } => {
@@ -392,13 +384,13 @@ impl<'a> ProseParser<'a> {
         }
     }
 
-    fn begin_parsing_point(&mut self, body_start: usize) -> Result<usize, ProseError> {
-        let id = self.new_region_id();
-        self.begin_parsing_facts(body_start, b'}', MarkerContinuation::PointEnd { id });
-        Ok(id)
+    fn open_point(&mut self, body_start: usize) -> usize {
+        let id = self.allocate_region_id();
+        self.begin_parsing_facts(body_start, b'}', MarkerContinuation::PointOpenEnd { id });
+        id
     }
 
-    fn begin_parsing_region(
+    fn open_region(
         &mut self,
         label: Option<&'a str>,
         marker_start: usize,
@@ -406,10 +398,10 @@ impl<'a> ProseParser<'a> {
     ) -> Result<usize, ProseError> {
         if label.is_some_and(|label| self.labeled_region_map.contains_key(label)) {
             self.offset = marker_start;
-            return Err(ProseError::ConflictingRegionLabel);
+            return Err(ProseError::DuplicateRegionLabel);
         }
 
-        let id = self.new_region_id();
+        let id = self.allocate_region_id();
         self.begin_parsing_facts(
             body_start,
             b'|',
@@ -423,28 +415,42 @@ impl<'a> ProseParser<'a> {
         Ok(id)
     }
 
+    fn open_block(&mut self, marker_start: usize, body_start: usize) -> usize {
+        let id = self.allocate_region_id();
+        self.begin_parsing_facts(
+            body_start,
+            b'|',
+            MarkerContinuation::BlockOpenEnd { id, marker_start },
+        );
+        id
+    }
+
     fn begin_parsing_facts(
         &mut self,
         body_start: usize,
         terminator: u8,
-        cont: MarkerContinuation<'a>,
+        after: MarkerContinuation<'a>,
     ) {
         self.offset = body_start;
-        self.state = ProseParserState::EmittingFacts {
-            parser: TermParser::new(&self.source[body_start..], terminator, self.operators),
+        self.state = ProseParserState::Facts {
+            parser: TermParser::with_terminator(
+                &self.source[body_start..],
+                terminator,
+                self.operators,
+            ),
             base: body_start,
-            cont,
+            after,
         };
     }
 
     fn step_facts(&mut self) -> Result<Option<ProseChunk<'a>>, ProseError> {
-        let ProseParserState::EmittingFacts { parser, base, .. } = &mut self.state else {
+        let ProseParserState::Facts { parser, base, .. } = &mut self.state else {
             unreachable!()
         };
         let base = *base;
 
         match parser.next() {
-            Some(Ok(event)) => return Ok(Some(ProseChunk::TermEvent(event))),
+            Some(Ok(event)) => return Ok(Some(ProseChunk::Term(event))),
             Some(Err(error)) => {
                 self.offset = base + parser.offset();
                 return Err(error.into());
@@ -452,11 +458,8 @@ impl<'a> ProseParser<'a> {
             None => {}
         }
 
-        let ProseParserState::EmittingFacts {
-            parser,
-            cont: after,
-            ..
-        } = std::mem::replace(&mut self.state, ProseParserState::Idle)
+        let ProseParserState::Facts { parser, after, .. } =
+            std::mem::replace(&mut self.state, ProseParserState::Idle)
         else {
             unreachable!()
         };
@@ -466,12 +469,12 @@ impl<'a> ProseParser<'a> {
 
     fn finish_parsing_facts(
         &mut self,
-        cont: MarkerContinuation<'a>,
+        after: MarkerContinuation<'a>,
     ) -> Result<Option<ProseChunk<'a>>, ProseError> {
-        match cont {
-            MarkerContinuation::PointEnd { id } => Ok(Some(ProseChunk::RegionEnd {
+        match after {
+            MarkerContinuation::PointOpenEnd { id } => Ok(Some(ProseChunk::RegionEnd {
                 id,
-                source_offset: self.offset,
+                source_end: self.offset,
             })),
             MarkerContinuation::RegionOpenEnd {
                 id,
@@ -501,10 +504,10 @@ impl<'a> ProseParser<'a> {
     fn parse_block_line(
         &mut self,
         end: usize,
-        ending: BlockLineEnd,
+        terminator: BlockLineTerminator,
     ) -> Result<Option<&'a str>, ProseError> {
-        if !is_start_of_line(self.source, self.offset) {
-            let line_end = scan_end_of_line(self.source, self.offset, end);
+        if !is_line_start_at(self.source, self.offset) {
+            let line_end = scan_line_end(self.source, self.offset, end);
             let text = &self.source[self.offset..line_end];
             self.offset = line_end;
             return Ok(Some(text));
@@ -520,26 +523,26 @@ impl<'a> ProseParser<'a> {
                 return Ok(Some(text));
             }
 
-            let line_end = scan_end_of_line(self.source, content_start, end);
-            let text = self.parse_block_indent(line_start..line_end, self.block_stack.len())?;
+            let line_end = scan_line_end(self.source, content_start, end);
+            let text = self.strip_block_indent(line_start..line_end, self.block_stack.len())?;
             self.offset = line_end;
             return Ok(Some(text));
         }
 
-        match ending {
-            BlockLineEnd::InlineMarker => {
-                let text = self.parse_block_indent(line_start..end, self.block_stack.len())?;
+        match terminator {
+            BlockLineTerminator::InlineMarker => {
+                let text = self.strip_block_indent(line_start..end, self.block_stack.len())?;
                 self.offset = end;
                 Ok(Some(text))
             }
-            BlockLineEnd::EndOfFile | BlockLineEnd::BlockMarker => {
+            BlockLineTerminator::EndOfFile | BlockLineTerminator::BlockMarker => {
                 self.offset = end;
                 Ok(None)
             }
         }
     }
 
-    fn parse_block_indent(
+    fn strip_block_indent(
         &mut self,
         range: Range<usize>,
         depth: usize,
@@ -570,9 +573,7 @@ impl<'a> ProseParser<'a> {
     }
 
     fn skip_block_marker_line_end(&mut self) -> Result<(), ProseError> {
-        while matches!(self.source.as_bytes().get(self.offset), Some(b' ' | b'\t')) {
-            self.offset += 1;
-        }
+        self.offset = scan_horizontal_whitespace(self.source, self.offset, self.source.len());
 
         if self.offset == self.source.len() {
             return Ok(());
@@ -602,7 +603,7 @@ impl<'a> Iterator for ProseParser<'a> {
             }
 
             match self.step() {
-                Ok(Some(event)) => return Some(Ok(event)),
+                Ok(Some(chunk)) => return Some(Ok(chunk)),
                 Ok(None) => {}
                 Err(error) => {
                     self.state = ProseParserState::Failed;
@@ -624,16 +625,16 @@ impl TextBoundary<'_> {
         }
     }
 
-    fn block_line_end(self) -> BlockLineEnd {
+    fn block_line_terminator(self) -> BlockLineTerminator {
         match self {
-            Self::EndOfFile => BlockLineEnd::EndOfFile,
-            Self::Inline(_) => BlockLineEnd::InlineMarker,
-            Self::Block { .. } => BlockLineEnd::BlockMarker,
+            Self::EndOfFile => BlockLineTerminator::EndOfFile,
+            Self::Inline(_) => BlockLineTerminator::InlineMarker,
+            Self::Block { .. } => BlockLineTerminator::BlockMarker,
         }
     }
 }
 
-fn is_start_of_line(source: &str, offset: usize) -> bool {
+fn is_line_start_at(source: &str, offset: usize) -> bool {
     offset == 0 || source.as_bytes().get(offset - 1) == Some(&b'\n')
 }
 
@@ -644,7 +645,7 @@ fn scan_marker<'a>(source: &'a str, offset: usize) -> Marker<'a> {
             marker_start: offset,
         }
     } else if rest.starts_with('{') {
-        Marker::PointStart {
+        Marker::PointOpenStart {
             marker_start: offset,
             body_start: offset + 2,
         }
@@ -712,7 +713,7 @@ fn scan_newline_sequence(source: &str, offset: usize, end: usize) -> Option<usiz
     }
 }
 
-fn scan_end_of_line(source: &str, mut offset: usize, end: usize) -> usize {
+fn scan_line_end(source: &str, mut offset: usize, end: usize) -> usize {
     while offset < end {
         if let Some(newline_end) = scan_newline_sequence(source, offset, end) {
             return newline_end;
