@@ -30,20 +30,8 @@
             "rust-src"
           ];
         };
-
-        rustPlatform = pkgs.makeRustPlatform {
-          cargo = rust;
-          rustc = rust;
-        };
       in
       {
-        packages.default = rustPlatform.buildRustPackage {
-          pname = "ilkc";
-          version = "0.1.0";
-          src = pkgs.lib.cleanSource ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-        };
-
         devShells.default = pkgs.mkShell {
           packages = [
             rust
